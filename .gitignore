@@ -218,3 +218,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local configuration, credentials, and database artifacts
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+secrets/
+credentials/
+*.pem
+*.key
+*.db
+*.sqlite*
+*.sql
+*.dump
+data/
+
+# Raw challenge materials and attachments
+raw/
+challenge/
+challenge_materials/
+challenge-materials/
+attachments/
