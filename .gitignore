@@ -233,7 +233,10 @@ credentials/
 *.sqlite*
 *.sql
 *.dump
-data/
+# Only public synthetic fixtures may be versioned under data/.
+/data/*
+!/data/sample/
+/data/private/
 
 # Raw challenge materials and attachments
 raw/
@@ -241,3 +244,4 @@ challenge/
 challenge_materials/
 challenge-materials/
 attachments/
+*.zip

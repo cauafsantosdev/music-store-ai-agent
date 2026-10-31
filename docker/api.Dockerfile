@@ -18,6 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY src ./src
 COPY tests ./tests
+COPY data/sample ./data/sample
 COPY web ./web
 COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked

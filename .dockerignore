@@ -20,7 +20,11 @@ dist
 *.sqlite*
 *.sql
 *.dump
-data
+# Allow only public synthetic fixtures into build contexts.
+data/*
+!data/sample/
+data/private
+*.zip
 secrets
 credentials
 raw

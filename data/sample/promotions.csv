@@ -1,0 +1,5 @@
+promotion_id,product_id,discount_percent,description,is_active
+401,101,10.50,Invented active discount,1
+402,102,100.00,Invented inactive discount,0
+403,103,0.00,Invented upcoming product flag,true
+404,101,5.00,Invented disabled discount,false

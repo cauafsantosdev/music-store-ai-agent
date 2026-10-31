@@ -1,0 +1,4 @@
+product_id,price_brl,name,category_id,description,stock_quantity,status,specs,created_at
+101,1234.56,Sample Acoustic,1,Invented acoustic instrument,4,active,"{""strings"":6,""materials"":{""body"":""sample wood""},""features"":[""acoustic"",""natural""]}",2025-01-10
+102,0.10,Sample Pick,2,Invented discontinued accessory,0,discontinued,"{""thickness_mm"":0.75}",2025-02-01
+103,999.99,Sample Electric,1,Invented upcoming instrument,0,coming_soon,"{""left_handed"":true,""finish"":null}",2025-03-01
