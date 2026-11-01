@@ -51,3 +51,21 @@ class OrderTrackingResult(BaseModel, frozen=True):
     order_date: date
     estimated_delivery: date | None
     tracking_code: str | None
+
+
+class PolicyExcerpt(BaseModel, frozen=True):
+    """A bounded source passage with a safe label and one-based physical PDF pages."""
+
+    document_id: str
+    document: str
+    section: str
+    title: str
+    page_start: int
+    page_end: int
+    excerpt: str
+
+
+class PolicySearchResult(BaseModel, frozen=True):
+    """Ranked reference passages, not generated answers or calibrated confidence."""
+
+    matches: tuple[PolicyExcerpt, ...]
