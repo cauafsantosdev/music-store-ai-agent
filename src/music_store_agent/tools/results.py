@@ -1,4 +1,4 @@
-"""Serializable catalog results containing only catalog and commercial information."""
+"""Serializable public results containing only operation-specific source facts."""
 
 from datetime import date
 
@@ -37,3 +37,17 @@ class ProductDetails(ProductPricing, frozen=True):
     status: str
     specs: JsonValue
     created_at: date
+
+
+class OrderTrackingResult(BaseModel, frozen=True):
+    """Minimal tracking snapshot after demonstration-only association verification.
+
+    The result does not establish authenticated ownership. Delivery dates remain
+    estimates, and no current shipment events or actual delivery dates are inferred.
+    """
+
+    order_id: int
+    status: str
+    order_date: date
+    estimated_delivery: date | None
+    tracking_code: str | None
