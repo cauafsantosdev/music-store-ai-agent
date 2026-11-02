@@ -18,6 +18,9 @@ class AgentSettings(BaseSettings):
     ai_demo_schema: str = Field(
         default="agent_demo", pattern=r"^agent_demo(?:_[a-z0-9_]+)?$"
     )
+    ai_state_schema: str = Field(
+        default="agent_state", pattern=r"^agent_state(?:_[a-z0-9_]+)?$", max_length=63
+    )
     ai_max_model_calls: int = Field(default=4, ge=1, le=8)
     ai_max_tool_calls: int = Field(default=6, ge=1, le=12)
     ai_recursion_limit: int = Field(default=24, ge=4, le=48)

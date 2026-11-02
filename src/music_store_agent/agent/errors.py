@@ -26,9 +26,13 @@ class ErrorCode(StrEnum):
     EXECUTION_LIMIT = "execution_limit"
     INVALID_INPUT = "invalid_input"
     EMPTY_RESPONSE = "empty_response"
+    SESSION_UNVERIFIED = "session_unverified"
+    STATE_UNINITIALIZED = "state_uninitialized"
 
 
 PUBLIC_MESSAGES: dict[ErrorCode, str] = {
+    ErrorCode.SESSION_UNVERIFIED: "Não foi possível acessar essa conversa.",
+    ErrorCode.STATE_UNINITIALIZED: "Inicialize a memória com --init-state.",
     ErrorCode.CONFIGURATION: "A configuração do assistente é inválida.",
     ErrorCode.MISSING_API_KEY: "Configure GROQ_API_KEY para iniciar o assistente.",
     ErrorCode.AUTHENTICATION: "Não foi possível autenticar o acesso ao assistente.",

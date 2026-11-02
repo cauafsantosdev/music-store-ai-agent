@@ -1,17 +1,20 @@
-"""Minimal Docker-oriented synthetic-demo initialization and process-local chat."""
+"""Minimal Docker CLI for synthetic data and durable capability-protected chat."""
 
 import argparse
 from collections.abc import Sequence
+from getpass import getpass
 
 from music_store_agent.agent.config import load_settings
 from music_store_agent.agent.demo import initialize_demo
 from music_store_agent.agent.errors import AgentFailure
 from music_store_agent.agent.factory import create_store_agent
+from music_store_agent.agent.memory import ConversationStore
+from music_store_agent.agent.service import StoreAgent
 from music_store_agent.database.session import create_database_engine
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Initialize a confirmed demo or interact with one new in-process conversation.
+    """Initialize data or manage a new or explicitly resumed durable conversation.
 
     Args:
         argv: Optional CLI arguments, otherwise taken from the process.
@@ -34,10 +37,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Criar somente um esquema vazio usando amostras públicas verificadas.",
     )
+    parser.add_argument(
+        "--init-state", action="store_true", help="Inicializar a memória PostgreSQL."
+    )
+    parser.add_argument(
+        "--resume", metavar="UUID", help="Retomar uma conversa com token oculto."
+    )
+    parser.add_argument(
+        "--show-access-token",
+        action="store_true",
+        help="Exibir explicitamente o token de uma nova conversa local.",
+    )
     args = parser.parse_args(argv)
+    if args.resume and args.show_access_token:
+        parser.error("--show-access-token requer uma nova conversa.")
     engine = None
+    agent: StoreAgent | None = None
     try:
         settings = load_settings()
+        if args.init_state:
+            with ConversationStore(settings.ai_state_schema) as store:
+                store.initialize()
+            print("Memória PostgreSQL inicializada.")
+            return 0
         engine = create_database_engine(schema=settings.ai_demo_schema)
         if args.init_demo:
             initialize_demo(engine)
@@ -46,7 +68,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Pedido de teste: 303; email: customer-203@example.test."
             )
             return 0
-        conversation = create_store_agent(engine, settings=settings).new_conversation()
+        agent = create_store_agent(engine, settings=settings)
+        conversation = (
+            agent.resume_conversation(args.resume, getpass("Token de acesso: "))
+            if args.resume
+            else agent.create_conversation()
+        )
+        print(f"Conversa: {conversation.conversation_id}")
+        if args.show_access_token:
+            print(f"Token local: {conversation.access_token.get_secret_value()}")
         print(
             "Assistente virtual — somente dados sintéticos. Digite sair para encerrar."
         )
@@ -66,6 +96,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(error))
         return 1
     finally:
+        if agent is not None:
+            agent.close()
         if engine is not None:
             engine.dispose()
 

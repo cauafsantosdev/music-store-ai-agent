@@ -1,7 +1,8 @@
 """Offline fixtures using real PostgreSQL tools and controlled model output."""
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncHTTPTransport, HTTPTransport
@@ -12,9 +13,11 @@ from langchain_core.outputs import ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 from sqlalchemy import Engine
+from sqlalchemy.schema import DropSchema
 
 from music_store_agent.agent.config import AgentSettings
 from music_store_agent.agent.demo import initialize_demo
+from music_store_agent.agent.memory import ConversationStore
 
 
 class SimulatedProviderError(RuntimeError):
@@ -144,3 +147,65 @@ def offline_settings() -> AgentSettings:
         Validated bounded settings with no API key.
     """
     return AgentSettings(groq_api_key=None)
+
+
+@pytest.fixture(autouse=True)
+def state_namespace(
+    database_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[str]:
+    """Give existing agent tests real isolated state pools with explicit cleanup.
+
+    Args:
+        database_engine: Disposable operational test engine, also used for DDL.
+        monkeypatch: Scoped namespace and owned-pool factory instrumentation.
+
+    Yields:
+        A unique state schema; initialization remains explicit and PostgreSQL real.
+    """
+    schema = f"agent_state_test_{uuid4().hex}"
+    monkeypatch.setenv("AI_STATE_SCHEMA", schema)
+    opened: list[ConversationStore] = []
+
+    def open_store(selected: str) -> ConversationStore:
+        """Initialize test state once and track every real pool for cleanup.
+
+        Args:
+            selected: Explicit test configuration namespace.
+
+        Returns:
+            A real PostgreSQL state store without mocked persistence operations.
+        """
+        assert selected == schema
+        store = ConversationStore(selected)
+        opened.append(store)
+        if len(opened) == 1:
+            store.initialize()
+        else:
+            store.check_ready()
+        return store
+
+    monkeypatch.setattr(
+        "music_store_agent.agent.factory.create_state_store", open_store
+    )
+    try:
+        yield schema
+    finally:
+        for store in opened:
+            store.close()
+        with database_engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+
+
+@pytest.fixture
+def state_store(state_namespace: str) -> Iterator[ConversationStore]:
+    """Manage an explicitly initialized real state pool for persistence tests.
+
+    Args:
+        state_namespace: Generated disposable state namespace.
+
+    Yields:
+        A real initialized pool, closed before schema teardown.
+    """
+    with ConversationStore(state_namespace) as store:
+        store.initialize()
+        yield store

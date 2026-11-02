@@ -1,25 +1,25 @@
-"""Process-local conversations preserving native tool-call message metadata."""
+"""Authorized durable conversations using native transactional LangGraph state."""
 
 import re
-from threading import Lock
+from collections.abc import Callable
+from typing import Literal
+from uuid import UUID
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langsmith import tracing_context
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from sqlalchemy import Engine
 
 from music_store_agent.agent.config import AgentSettings
 from music_store_agent.agent.demo import verify_demo
-from music_store_agent.agent.errors import (
-    PUBLIC_MESSAGES,
-    AgentFailure,
-    ErrorCode,
-    provider_failure,
-)
+from music_store_agent.agent.errors import AgentFailure, ErrorCode, provider_failure
+from music_store_agent.agent.memory import ConversationStore
 
 
 class AgentReply(BaseModel, frozen=True):
@@ -30,17 +30,24 @@ class AgentReply(BaseModel, frozen=True):
     tool_calls: int = 0
 
 
-def _validate_message(message: str) -> None:
-    """Bound demonstration text and reject ordinary real email/phone inputs.
+class HistoryMessage(BaseModel, frozen=True):
+    """Display text without tool payloads, system prompts, or hidden metadata."""
 
-    This is a development guard, not a general PII classifier. Callers must never
-    paste private documents or real personal records into the demonstration CLI.
+    role: Literal["user", "assistant"]
+    text: str
+
+
+def _validate_message(message: str) -> None:
+    """Bound demonstration input and reject ordinary real email/phone values.
+
+    This guard is not a general PII classifier. Private documents and real
+    personal records must never be submitted through demonstration clients.
 
     Args:
         message: Untrusted user text.
 
     Raises:
-        AgentFailure: If text is empty, oversized, non-text, or contains real contacts.
+        AgentFailure: If input is invalid, oversized, or contains real contacts.
     """
     if not isinstance(message, str) or not message.strip() or len(message) > 2000:
         raise AgentFailure(ErrorCode.INVALID_INPUT)
@@ -51,66 +58,224 @@ def _validate_message(message: str) -> None:
         raise AgentFailure(ErrorCode.INVALID_INPUT)
 
 
+def _token_value(token: str | SecretStr) -> str:
+    """Extract an unlogged capability at the authorization boundary.
+
+    Args:
+        token: Plain or redacted capability wrapper.
+
+    Returns:
+        The capability value.
+    """
+    return token.get_secret_value() if isinstance(token, SecretStr) else token
+
+
+def _config(identifier: UUID | str) -> RunnableConfig:
+    """Build native thread routing without credentials or sensitive metadata.
+
+    Args:
+        identifier: Authorized conversation UUID.
+
+    Returns:
+        Native checkpoint routing configuration.
+    """
+    return {"configurable": {"thread_id": str(UUID(str(identifier)))}}
+
+
+def _messages(saver: PostgresSaver, identifier: UUID | str) -> list[BaseMessage]:
+    """Read native messages only after capability authorization.
+
+    Args:
+        saver: Saver bound to the authorized transaction.
+        identifier: Authorized UUID.
+
+    Returns:
+        Native messages retaining required provider metadata.
+    """
+    checkpoint = saver.get_tuple(_config(identifier))
+    if checkpoint is None:
+        return []
+    return checkpoint.checkpoint["channel_values"].get("messages", [])
+
+
 class Conversation:
-    """Own one native-message history with no database checkpoints or disk logs."""
+    """Hold a redacted capability to a durable session without caching history."""
 
-    _engine: Engine
-    _graph: CompiledStateGraph
-    _settings: AgentSettings
-    _messages: list[BaseMessage]
-    _lock: Lock
+    conversation_id: UUID
+    access_token: SecretStr
+    _agent: "StoreAgent"
 
-    def __init__(
-        self, engine: Engine, graph: CompiledStateGraph, settings: AgentSettings
-    ) -> None:
-        """Start an isolated empty conversation.
+    def __init__(self, agent: "StoreAgent", identifier: UUID, token: str) -> None:
+        """Retain only an authorized session handle.
 
         Args:
-            engine: Verified synthetic data engine.
-            graph: Stateless create_agent graph shared without checkpointers.
-            settings: Validated execution and history limits.
+            agent: Owning service.
+            identifier: Unique conversation UUID.
+            token: Opaque capability, redacted in representations.
         """
-        self._engine, self._graph, self._settings = engine, graph, settings
-        self._messages = []
-        self._lock = Lock()
+        self._agent = agent
+        self.conversation_id = identifier
+        self.access_token = SecretStr(token)
 
     @property
     def messages(self) -> tuple[BaseMessage, ...]:
-        """Return defensive native-message copies for local inspection.
+        """Return sanitized native copies for local compatibility inspection.
+
+        Persisted state retains all metadata. Customer clients should use
+        get_conversation_history(), which also omits all tool payloads.
 
         Returns:
-            Messages preserving tool-call IDs, signatures, and provider metadata.
+            Authorized copies without hidden metadata or tool artifacts.
         """
-        return tuple(message.model_copy(deep=True) for message in self._messages)
+        return self._agent.native_history(self.conversation_id, self.access_token)
 
     def send(self, message: str) -> AgentReply:
-        """Execute one bounded turn and commit history only after a complete response.
+        """Send a message through the capability-authorized durable service.
 
         Args:
-            message: Non-sensitive synthetic-demo text in a single human turn.
+            message: Non-sensitive synthetic input.
 
         Returns:
-            A response in the requested persona or a sanitized Portuguese failure.
-            Failed turns leave prior history intact; tool-call sequences are never
-            truncated or reconstructed from flattened text/JSON.
+            A completed response or sanitized failure.
         """
-        with self._lock:
-            try:
-                _validate_message(message)
-                # Reserve the smallest complete human/assistant exchange up front.
-                if len(self._messages) + 2 > self._settings.ai_max_history_messages:
-                    raise AgentFailure(ErrorCode.EXECUTION_LIMIT)
+        return self._agent.send_message(
+            self.conversation_id, self.access_token, message
+        )
+
+
+class StoreAgent:
+    """Manage durable sessions with PostgreSQL locks and official checkpoints."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        build_graph: Callable[[PostgresSaver], CompiledStateGraph],
+        settings: AgentSettings,
+        store: ConversationStore,
+        *,
+        owns_store: bool = False,
+    ) -> None:
+        """Retain explicit dependencies without loading conversation history.
+
+        Args:
+            engine: Verified synthetic operational engine.
+            build_graph: Bind create_agent to the current transaction's saver.
+            settings: Bounded runtime configuration.
+            store: Initialized state store in a separate schema.
+            owns_store: Whether close() must release the store.
+        """
+        self._engine, self._build_graph = engine, build_graph
+        self._settings, self._store = settings, store
+        self._owns_store, self._closed = owns_store, False
+
+    def __enter__(self) -> "StoreAgent":
+        """Return the explicitly managed service.
+
+        Returns:
+            This agent service.
+        """
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Close owned resources on normal exit or interruption.
+
+        Args:
+            exc_type: Optional exception type.
+            exc_value: Optional exception instance.
+            traceback: Optional traceback, deliberately not logged.
+        """
+        self.close()
+
+    def close(self) -> None:
+        """Release an owned pool without closing externally managed stores."""
+        if self._owns_store:
+            self._store.close()
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        """Reject use after service shutdown.
+
+        Raises:
+            AgentFailure: If the service is closed.
+        """
+        if self._closed:
+            raise AgentFailure(ErrorCode.DATABASE)
+
+    def create_conversation(self) -> Conversation:
+        """Create a UUID session and fresh unlogged access capability.
+
+        Returns:
+            A handle containing the UUID and redacted token.
+        """
+        self._ensure_open()
+        verify_demo(self._engine)
+        identifier, token = self._store.create()
+        return Conversation(self, identifier, token)
+
+    def new_conversation(self) -> Conversation:
+        """Preserve the original creation interface using durable storage.
+
+        Returns:
+            A new durable session handle.
+        """
+        return self.create_conversation()
+
+    def resume_conversation(
+        self, conversation_id: UUID | str, access_token: str | SecretStr
+    ) -> Conversation:
+        """Authorize a prior session before reading checkpoint state.
+
+        Args:
+            conversation_id: Untrusted UUID.
+            access_token: Matching capability.
+
+        Returns:
+            An authorized handle without duplicating saved history.
+
+        Raises:
+            AgentFailure: Uniformly for unknown IDs and invalid capabilities.
+        """
+        self._ensure_open()
+        token = _token_value(access_token)
+        with self._store.authorized(conversation_id, token):
+            return Conversation(self, UUID(str(conversation_id)), token)
+
+    def send_message(
+        self, conversation_id: UUID | str, access_token: str | SecretStr, message: str
+    ) -> AgentReply:
+        """Atomically commit a complete turn under a cross-process row lock.
+
+        The saver shares the outer transaction connection. Intermediate checkpoints,
+        pending writes and counters roll back on failure or process death. Recovery
+        starts from the last completed turn rather than replaying incomplete tools.
+
+        Args:
+            conversation_id: Target UUID.
+            access_token: Matching capability.
+            message: Synthetic input; only this new message is passed to the graph.
+
+        Returns:
+            Success only after commit; failure leaves prior history intact.
+        """
+        try:
+            self._ensure_open()
+            _validate_message(message)
+            with self._store.authorized(
+                conversation_id, _token_value(access_token)
+            ) as connection:
                 verify_demo(self._engine)
-                previous = [item.model_copy(deep=True) for item in self._messages]
-                proposed = previous + [HumanMessage(content=message.strip())]
-                # Explicitly disable tracing even if a developer has tracing env vars.
+                saver = self._store.saver(connection)
+                previous = _messages(saver, conversation_id)
+                if len(previous) + 2 > self._settings.ai_max_history_messages:
+                    raise AgentFailure(ErrorCode.EXECUTION_LIMIT)
+                config = _config(conversation_id)
+                config.update(
+                    recursion_limit=self._settings.ai_recursion_limit, callbacks=[]
+                )
                 with tracing_context(enabled=False):
-                    result = self._graph.invoke(
-                        {"messages": proposed},
-                        config={
-                            "recursion_limit": self._settings.ai_recursion_limit,
-                            "callbacks": [],
-                        },
+                    result = self._build_graph(saver).invoke(
+                        {"messages": [HumanMessage(content=message.strip())]},
+                        config=config,
                     )
                 messages = result["messages"]
                 last = messages[-1]
@@ -122,47 +287,97 @@ class Conversation:
                     raise AgentFailure(ErrorCode.EMPTY_RESPONSE)
                 if len(messages) > self._settings.ai_max_history_messages:
                     raise AgentFailure(ErrorCode.EXECUTION_LIMIT)
-                self._messages = [item.model_copy(deep=True) for item in messages]
                 calls = sum(
                     isinstance(item, ToolMessage) for item in messages[len(previous) :]
                 )
-                return AgentReply(text=last.text, tool_calls=calls)
-            except (
-                GraphRecursionError,
-                ModelCallLimitExceededError,
-                ToolCallLimitExceededError,
-            ):
-                error = AgentFailure(ErrorCode.EXECUTION_LIMIT)
-            except AgentFailure as failure:
-                error = failure
-            except Exception as failure:
-                error = provider_failure(failure)
-            return AgentReply(text=PUBLIC_MESSAGES[error.code], code=error.code.value)
+                reply = AgentReply(text=last.text, tool_calls=calls)
+                connection.execute(
+                    "UPDATE conversations SET updated_at = clock_timestamp() "
+                    "WHERE conversation_id = %s",
+                    (UUID(str(conversation_id)),),
+                )
+            return reply
+        except (
+            GraphRecursionError,
+            ModelCallLimitExceededError,
+            ToolCallLimitExceededError,
+        ):
+            error = AgentFailure(ErrorCode.EXECUTION_LIMIT)
+        except AgentFailure as failure:
+            error = failure
+        except Exception as failure:
+            error = provider_failure(failure)
+        return AgentReply(text=str(error), code=error.code.value)
 
-
-class StoreAgent:
-    """Create independent in-process conversations around one stateless agent graph."""
-
-    _engine: Engine
-    _graph: CompiledStateGraph
-    _settings: AgentSettings
-
-    def __init__(
-        self, engine: Engine, graph: CompiledStateGraph, settings: AgentSettings
-    ) -> None:
-        """Retain explicit runtime dependencies without creating conversation state.
+    def native_history(
+        self, conversation_id: UUID | str, access_token: str | SecretStr
+    ) -> tuple[BaseMessage, ...]:
+        """Read compatibility copies without mutating persisted provider metadata.
 
         Args:
-            engine: Verified synthetic schema engine.
-            graph: Compiled LangGraph runtime returned by create_agent.
-            settings: Validated execution limits.
-        """
-        self._engine, self._graph, self._settings = engine, graph, settings
-
-    def new_conversation(self) -> Conversation:
-        """Start a new conversation without messages from any prior conversation.
+            conversation_id: Target UUID.
+            access_token: Matching capability.
 
         Returns:
-            An isolated process-local conversation.
+            Native display copies with hidden metadata removed.
         """
-        return Conversation(self._engine, self._graph, self._settings)
+        self._ensure_open()
+        with self._store.authorized(
+            conversation_id, _token_value(access_token)
+        ) as connection:
+            copies: list[BaseMessage] = []
+            for message in _messages(self._store.saver(connection), conversation_id):
+                item = message.model_copy(deep=True)
+                item.additional_kwargs, item.response_metadata = {}, {}
+                if isinstance(item, AIMessage):
+                    item.usage_metadata = None
+                    item.tool_calls = [
+                        {
+                            key: call[key]
+                            for key in ("name", "args", "id", "type")
+                            if key in call
+                        }
+                        for call in item.tool_calls
+                    ]
+                if isinstance(item, ToolMessage):
+                    item.artifact = None
+                copies.append(item)
+            return tuple(copies)
+
+    def get_conversation_history(
+        self, conversation_id: UUID | str, access_token: str | SecretStr
+    ) -> tuple[HistoryMessage, ...]:
+        """Return authorized display text without system, tool or provider details.
+
+        Args:
+            conversation_id: Target UUID.
+            access_token: Matching capability.
+
+        Returns:
+            Human and final assistant text only.
+        """
+        return tuple(
+            HistoryMessage(
+                role="user" if isinstance(item, HumanMessage) else "assistant",
+                text=item.text,
+            )
+            for item in self.native_history(conversation_id, access_token)
+            if isinstance(item, HumanMessage)
+            or (
+                isinstance(item, AIMessage)
+                and not item.tool_calls
+                and item.text.strip()
+            )
+        )
+
+    def delete_conversation(
+        self, conversation_id: UUID | str, access_token: str | SecretStr
+    ) -> None:
+        """Delete only authorized metadata and associated native checkpoints.
+
+        Args:
+            conversation_id: Target UUID.
+            access_token: Matching capability.
+        """
+        self._ensure_open()
+        self._store.delete(conversation_id, _token_value(access_token))

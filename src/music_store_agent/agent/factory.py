@@ -15,12 +15,15 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_groq import ChatGroq
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from sqlalchemy import Engine
 
 from music_store_agent.agent.config import AgentSettings, load_settings
 from music_store_agent.agent.demo import verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
+from music_store_agent.agent.memory import ConversationStore, create_state_store
 from music_store_agent.agent.prompts import SYSTEM_PROMPT
 from music_store_agent.agent.service import StoreAgent
 from music_store_agent.agent.tool_registry import build_tools, tool_failure
@@ -62,6 +65,7 @@ def create_store_agent(
     *,
     settings: AgentSettings | None = None,
     model: BaseChatModel | None = None,
+    state_store: ConversationStore | None = None,
 ) -> StoreAgent:
     """Create a bounded tool agent only after synthetic provenance is verified.
 
@@ -69,9 +73,10 @@ def create_store_agent(
         engine: Explicit, confirmed synthetic namespace; never a fallback schema.
         settings: Validated environment settings, or lazily read when omitted.
         model: Controlled chat model for offline tests; omitted for live GroqCloud.
+        state_store: Explicit initialized store, or an owned default pool.
 
     Returns:
-        A stateless agent factory supporting isolated process-local conversations.
+        A durable service; close() or a context manager releases its owned pool.
 
     Raises:
         AgentFailure: If data provenance, API key, or model configuration is invalid.
@@ -79,6 +84,11 @@ def create_store_agent(
     settings = settings or load_settings()
     verify_demo(engine)
     model = model if model is not None else create_live_model(settings)
+    owns_store = state_store is None
+    if state_store is None:
+        state_store = create_state_store(settings.ai_state_schema)
+    else:
+        state_store.check_ready()
 
     @wrap_model_call
     def guard_model(
@@ -97,6 +107,8 @@ def create_store_agent(
             AgentFailure: If the selected dataset is no longer confirmed synthetic.
         """
         verify_demo(engine)
+        if len(request.state["messages"]) > settings.ai_max_history_messages:
+            raise AgentFailure(ErrorCode.EXECUTION_LIMIT)
         return handler(request)
 
     @wrap_tool_call
@@ -126,19 +138,30 @@ def create_store_agent(
                 status="error",
             )
 
-    graph = create_agent(
-        model=model,
-        tools=build_tools(engine),
-        system_prompt=SYSTEM_PROMPT,
-        middleware=[
-            ModelCallLimitMiddleware(
-                run_limit=settings.ai_max_model_calls, exit_behavior="error"
-            ),
-            ToolCallLimitMiddleware(
-                run_limit=settings.ai_max_tool_calls, exit_behavior="error"
-            ),
-            guard_model,
-            guard_tool,
-        ],
-    )
-    return StoreAgent(engine, graph, settings)
+    def build_graph(saver: PostgresSaver) -> CompiledStateGraph:
+        """Bind an official saver to an authorized transaction.
+
+        Args:
+            saver: Saver sharing the operation's outer transaction.
+
+        Returns:
+            A create_agent graph preserving all existing execution limits.
+        """
+        return create_agent(
+            model=model,
+            tools=build_tools(engine),
+            system_prompt=SYSTEM_PROMPT,
+            checkpointer=saver,
+            middleware=[
+                ModelCallLimitMiddleware(
+                    run_limit=settings.ai_max_model_calls, exit_behavior="error"
+                ),
+                ToolCallLimitMiddleware(
+                    run_limit=settings.ai_max_tool_calls, exit_behavior="error"
+                ),
+                guard_model,
+                guard_tool,
+            ],
+        )
+
+    return StoreAgent(engine, build_graph, settings, state_store, owns_store=owns_store)
