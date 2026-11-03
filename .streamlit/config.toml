@@ -1,0 +1,25 @@
+[theme]
+base = "dark"
+primaryColor = "#EAB36B"
+backgroundColor = "#101827"
+secondaryBackgroundColor = "#1B2A3D"
+textColor = "#F2F5FA"
+grayTextColor = "#B4C1D2"
+greenColor = "#2D9A8C"
+font = "sans serif"
+baseRadius = "large"
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#1B2A3D"
+secondaryBackgroundColor = "#101827"
+
+[runner]
+fastReruns = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"
+
+[browser]
+gatherUsageStats = false

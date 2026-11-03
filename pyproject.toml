@@ -30,7 +30,7 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/music_store_agent"]
+packages = ["src/music_store_agent", "web"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

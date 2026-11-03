@@ -18,6 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY src ./src
 COPY web ./web
+COPY .streamlit/config.toml ./.streamlit/config.toml
 COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 

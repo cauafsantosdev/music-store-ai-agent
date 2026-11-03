@@ -61,6 +61,7 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:8000}
       BACKEND_TIMEOUT_SECONDS: ${BACKEND_TIMEOUT_SECONDS:-5}
+      BACKEND_READ_TIMEOUT_SECONDS: ${BACKEND_READ_TIMEOUT_SECONDS:-180}
     ports:
       - "127.0.0.1:${WEB_PORT:-8501}:8501"
     volumes:
