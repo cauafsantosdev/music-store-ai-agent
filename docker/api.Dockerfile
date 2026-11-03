@@ -24,4 +24,4 @@ COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
 
 EXPOSE 8000
-CMD ["uv", "run", "--no-sync", "uvicorn", "music_store_agent.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "src"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "music_store_agent.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--reload", "--reload-dir", "src"]
