@@ -35,7 +35,10 @@ packages = ["src/music_store_agent", "web"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-config --strict-markers"
-markers = ["live: explicitly opted-in external GroqCloud smoke test"]
+markers = [
+    "live: explicitly opted-in external GroqCloud smoke test",
+    "live_eval: separate RUN_LIVE_GROQ_EVAL opt-in with a fifteen-request budget",
+]
 
 [tool.ruff]
 target-version = "py312"

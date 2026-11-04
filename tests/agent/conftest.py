@@ -88,13 +88,21 @@ class ScriptedModel(FakeMessagesListChatModel):
 
 
 @pytest.fixture(autouse=True)
-def block_live_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+def block_live_model_calls(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
     """Block real HTTP transports unless the explicit live test was enabled.
 
     Args:
         monkeypatch: Scoped SDK transport replacements for offline tests only.
+        request: Current test, used to scope the separate evaluation opt-in.
     """
     if os.getenv("RUN_LIVE_GROQ") == "1":
+        return
+    if (
+        request.node.get_closest_marker("live_eval") is not None
+        and os.getenv("RUN_LIVE_GROQ_EVAL") == "1"
+    ):
         return
 
     def blocked(*args: object, **kwargs: object) -> None:
