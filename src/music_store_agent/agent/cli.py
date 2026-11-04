@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from getpass import getpass
 
 from music_store_agent.agent.config import load_settings
-from music_store_agent.agent.demo import initialize_demo
+from music_store_agent.agent.demo import initialize_demo, select_dataset
 from music_store_agent.agent.errors import AgentFailure
 from music_store_agent.agent.factory import create_store_agent
 from music_store_agent.agent.memory import ConversationStore
@@ -35,7 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--init-demo",
         action="store_true",
-        help="Criar somente um esquema vazio usando amostras públicas verificadas.",
+        help="Inicializar o esquema vazio e o PDF do conjunto sintético selecionado.",
     )
     parser.add_argument(
         "--init-state", action="store_true", help="Inicializar a memória PostgreSQL."
@@ -56,13 +56,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings()
         if args.init_state:
-            with ConversationStore(settings.ai_state_schema) as store:
+            with ConversationStore(
+                settings.ai_state_schema, dataset_mode=settings.ai_dataset_mode
+            ) as store:
                 store.initialize()
             print("Memória PostgreSQL inicializada.")
             return 0
-        engine = create_database_engine(schema=settings.ai_demo_schema)
+        engine = select_dataset(
+            create_database_engine(schema=settings.ai_demo_schema), settings
+        )
         if args.init_demo:
             initialize_demo(engine)
+            if settings.ai_dataset_mode == "challenge":
+                print(
+                    "Conjunto challenge confirmado: 65 produtos; PDF original indexado."
+                )
+                return 0
             print(
                 "Demonstração sintética confirmada. "
                 "Pedido de teste: 303; email: customer-203@example.test."

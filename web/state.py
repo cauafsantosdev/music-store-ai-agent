@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
+from uuid import uuid4
 
 from web.client import BackendClient, Capability, ClientError, DisplayMessage
 
@@ -13,8 +14,8 @@ type Action = Literal["send", "history", "delete", "status"]
 class ChatState:
     """Keep capabilities only in one Streamlit server-side browser session.
 
-    Normal reruns retain this object. A lost browser session cannot recover its
-    capability; new chat starts afresh without deleting previous backend records.
+    Normal reruns retain this object. Configured HttpOnly-cookie recovery restores
+    capabilities after a new WebSocket; PostgreSQL remains the history authority.
     """
 
     capability: Capability | None = field(default=None, repr=False)
@@ -27,6 +28,10 @@ class ChatState:
     error: ClientError | None = None
     backend_ready: bool | None = None
     notice: str | None = None
+    browser_persistent: bool = False
+    browser_ready: bool = False
+    browser_operation: Literal["start", "new", "clear"] | None = None
+    browser_revision: str | None = None
 
     def reset(self) -> None:
         """Forget local state without deleting or implicitly reusing any capability."""
@@ -115,11 +120,15 @@ class ChatState:
             elif action == "delete" and self.capability and self.confirm_delete:
                 client.delete(self.capability)
                 self.reset()
+                if self.browser_persistent:
+                    self.browser_operation = "clear"
+                    self.browser_revision = str(uuid4())
                 self.notice = "Conversa excluída."
             elif action == "status":
                 self.backend_ready = client.status()
             finished = True
         except ClientError as error:
+            error.request_id = client.request_id
             self.error = error
             # Failed sends stay visible as unconfirmed input, never assistant replies.
             # Even a timeout may have committed; only an explicit GET reconciles it.

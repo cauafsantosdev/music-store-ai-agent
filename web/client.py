@@ -126,7 +126,8 @@ ERROR_MESSAGES: dict[str, str] = {
         "Não foi possível conectar ao atendimento. Verifique a conexão mais tarde."
     ),
     "read_timeout": (
-        "O tempo de espera terminou. Atualize o histórico para confirmar o resultado."
+        "O tempo de espera terminou. O resultado pode ter sido salvo. "
+        "Atualize o histórico para confirmar."
     ),
     "protocol": (
         "Não foi possível confirmar a resposta do atendimento. Atualize o histórico."
@@ -145,18 +146,40 @@ ERROR_MESSAGES: dict[str, str] = {
 }
 
 
+def validated_request_id(value: str | None) -> str | None:
+    """Accept only canonical UUID4 response references, never arbitrary header text.
+
+    Args:
+        value: Optional backend correlation header.
+
+    Returns:
+        A bounded non-secret reference or None for malformed metadata.
+    """
+    if value is None or len(value) != 36:
+        return None
+    try:
+        identifier = UUID(value)
+    except ValueError:
+        return None
+    return value if str(identifier) == value and identifier.version == 4 else None
+
+
 class ClientError(Exception):
     """Carry fixed Portuguese feedback without raw HTTP exceptions or payloads."""
 
-    def __init__(self, code: str, *, ambiguous: bool = False) -> None:
+    def __init__(
+        self, code: str, *, ambiguous: bool = False, request_id: str | None = None
+    ) -> None:
         """Retain only allowlisted diagnostic categories.
 
         Args:
             code: Fixed frontend error identifier.
             ambiguous: Whether a submitted operation may already have committed.
+            request_id: Optional validated backend reference, without request contents.
         """
         self.code = code if code in ERROR_MESSAGES else "unavailable"
         self.ambiguous = ambiguous
+        self.request_id = validated_request_id(request_id)
         super().__init__(ERROR_MESSAGES[self.code])
 
 
@@ -209,6 +232,7 @@ class BackendClient:
             settings: Validated backend connection configuration.
         """
         self.settings = settings
+        self.request_id: str | None = None
         self.http = httpx.Client(
             base_url=str(settings.backend_url).rstrip("/"),
             timeout=settings.timeout(),
@@ -287,6 +311,7 @@ class BackendClient:
         Raises:
             ClientError: For sanitized transport and HTTP failures.
         """
+        self.request_id = None
         try:
             response = self.http.request(
                 method,
@@ -298,6 +323,7 @@ class BackendClient:
             raise ClientError("read_timeout", ambiguous=method != "GET") from None
         except httpx.HTTPError:
             raise ClientError("connection", ambiguous=method != "GET") from None
+        self.request_id = validated_request_id(response.headers.get("x-request-id"))
         if response.status_code >= 300:
             raise self.http_error(response.status_code)
         return response
@@ -412,6 +438,7 @@ class BackendClient:
         Raises:
             ClientError: For HTTP errors, explicit error events or incomplete delivery.
         """
+        self.request_id = None
         try:
             with self.http.stream(
                 "POST",
@@ -419,6 +446,9 @@ class BackendClient:
                 headers=self.headers(capability),
                 json={"message": message},
             ) as response:
+                self.request_id = validated_request_id(
+                    response.headers.get("x-request-id")
+                )
                 if response.status_code != 200:
                     raise self.http_error(response.status_code)
                 if (

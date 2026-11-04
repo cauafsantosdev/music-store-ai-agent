@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from music_store_agent.agent.demo import verified_snapshot
+from music_store_agent.agent.demo import dataset_mode, verified_snapshot
 from music_store_agent.agent.errors import PUBLIC_MESSAGES, AgentFailure, ErrorCode
 from music_store_agent.policies.errors import PolicyIndexMissing, PolicySearchError
 from music_store_agent.services.order_verification import (
@@ -84,6 +84,23 @@ class PolicyArguments(ToolArguments):
 
     query: str = Field(min_length=1, max_length=500)
     limit: int = Field(default=3, ge=1, le=3)
+
+
+class ChallengeOrderArguments(OrderArguments):
+    """Allow original synthetic addresses only behind verified challenge provenance."""
+
+    @field_validator("customer_email")
+    @classmethod
+    def validate_synthetic_email(cls, value: str) -> str:
+        """Validate address syntax without imposing the public fixture domain.
+
+        Args:
+            value: Untrusted address for an exact order/email association check.
+
+        Returns:
+            Structurally validated address; existing SQL performs authorization.
+        """
+        return normalize_customer_email(value)
 
 
 def tool_failure(code: ErrorCode) -> dict[str, object]:
@@ -254,7 +271,7 @@ def build_tools(engine: Engine) -> tuple[BaseTool, ...]:
 
         Args:
             order_id: Exact source order identifier.
-            customer_email: Synthetic example.test email associated with that order.
+            customer_email: Approved synthetic email associated with that exact order.
 
         Returns:
             Only approved tracking fields, or one uniform unverified outcome.
@@ -288,7 +305,12 @@ def build_tools(engine: Engine) -> tuple[BaseTool, ...]:
         (get_product_details, ProductArguments),
         (get_product_pricing, ProductArguments),
         (get_active_promotions, PromotionArguments),
-        (get_order_status, OrderArguments),
+        (
+            get_order_status,
+            ChallengeOrderArguments
+            if dataset_mode(engine) == "challenge"
+            else OrderArguments,
+        ),
         (search_store_policies, PolicyArguments),
     )
     return tuple(

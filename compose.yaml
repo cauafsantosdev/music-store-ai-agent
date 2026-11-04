@@ -30,18 +30,27 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-openai/gpt-oss-120b}
-      AI_DEMO_SCHEMA: ${AI_DEMO_SCHEMA:-agent_demo}
-      AI_STATE_SCHEMA: ${AI_STATE_SCHEMA:-agent_state}
+      AI_DATASET_MODE: ${AI_DATASET_MODE:-sample}
+      AI_DEMO_SCHEMA: ${AI_DEMO_SCHEMA:-}
+      AI_STATE_SCHEMA: ${AI_STATE_SCHEMA:-}
       AI_MAX_MODEL_CALLS: ${AI_MAX_MODEL_CALLS:-4}
       AI_MAX_TOOL_CALLS: ${AI_MAX_TOOL_CALLS:-6}
       AI_RECURSION_LIMIT: ${AI_RECURSION_LIMIT:-24}
       AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-2048}
       AI_PROVIDER_TIMEOUT_SECONDS: ${AI_PROVIDER_TIMEOUT_SECONDS:-30}
       AI_MAX_HISTORY_MESSAGES: ${AI_MAX_HISTORY_MESSAGES:-60}
+      BROWSER_SESSION_KEY: ${BROWSER_SESSION_KEY:-}
+      BROWSER_APP_ORIGIN: ${BROWSER_APP_ORIGIN:-http://localhost:${WEB_PORT:-8501}}
+      BROWSER_SESSION_API_ORIGIN: ${BROWSER_SESSION_API_ORIGIN:-http://localhost:${API_PORT:-8000}}
+      BROWSER_SESSION_ALLOW_HTTP_LOCALHOST: ${BROWSER_SESSION_ALLOW_HTTP_LOCALHOST:-false}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - .:/app
+      - ./data/sample:/app/data/sample:ro
+    # Hide ignored local datasets from the development repository bind mount.
+    tmpfs:
+      - /app/data
     depends_on:
       db:
         condition: service_healthy
@@ -60,8 +69,13 @@ services:
       dockerfile: docker/web.Dockerfile
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:8000}
+      AI_DATASET_MODE: ${AI_DATASET_MODE:-sample}
       BACKEND_TIMEOUT_SECONDS: ${BACKEND_TIMEOUT_SECONDS:-5}
       BACKEND_READ_TIMEOUT_SECONDS: ${BACKEND_READ_TIMEOUT_SECONDS:-180}
+      BROWSER_SESSION_KEY: ${BROWSER_SESSION_KEY:-}
+      BROWSER_APP_ORIGIN: ${BROWSER_APP_ORIGIN:-http://localhost:${WEB_PORT:-8501}}
+      BROWSER_SESSION_API_ORIGIN: ${BROWSER_SESSION_API_ORIGIN:-http://localhost:${API_PORT:-8000}}
+      BROWSER_SESSION_ALLOW_HTTP_LOCALHOST: ${BROWSER_SESSION_ALLOW_HTTP_LOCALHOST:-false}
     ports:
       - "127.0.0.1:${WEB_PORT:-8501}:8501"
     volumes:

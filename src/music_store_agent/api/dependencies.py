@@ -14,12 +14,13 @@ from pydantic import SecretStr
 from sqlalchemy import Engine
 
 from music_store_agent.agent.config import AgentSettings, load_settings
-from music_store_agent.agent.demo import verify_demo
+from music_store_agent.agent.demo import dataset_mode, select_dataset, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
 from music_store_agent.agent.factory import create_live_model, create_store_agent
 from music_store_agent.agent.memory import ConversationStore, create_state_store
 from music_store_agent.agent.service import Conversation, StoreAgent
 from music_store_agent.api.errors import APIError
+from music_store_agent.api.schemas import MessageRequest
 from music_store_agent.database.session import create_database_engine
 
 bearer = HTTPBearer(
@@ -72,9 +73,12 @@ class AppResources:
         """
         with self._initialization_lock:
             if self._engine is None:
-                self._engine = create_database_engine(
-                    schema=self.settings().ai_demo_schema
+                self._engine = select_dataset(
+                    create_database_engine(schema=self.settings().ai_demo_schema),
+                    self.settings(),
                 )
+            if dataset_mode(self._engine) != self.settings().ai_dataset_mode:
+                raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
             return self._engine
 
     def store(self) -> ConversationStore:
@@ -85,7 +89,16 @@ class AppResources:
         """
         with self._initialization_lock:
             if self._store is None:
-                self._store = create_state_store(self.settings().ai_state_schema)
+                settings = self.settings()
+                self._store = (
+                    create_state_store(
+                        settings.ai_state_schema, dataset_mode="challenge"
+                    )
+                    if settings.ai_dataset_mode == "challenge"
+                    else create_state_store(settings.ai_state_schema)
+                )
+            if self._store.dataset_mode != self.settings().ai_dataset_mode:
+                raise AgentFailure(ErrorCode.SESSION_UNVERIFIED)
             return self._store
 
     def ready(self) -> None:
@@ -221,3 +234,19 @@ def reject_query_parameters(request: Request) -> None:
     """
     if request.query_params:
         raise APIError("invalid_request")
+
+
+def validated_message(
+    payload: MessageRequest, agent: Annotated[StoreAgent, Depends(get_agent)]
+) -> MessageRequest:
+    """Reject unapproved contact data before starting any HTTP or SSE model work.
+
+    Args:
+        payload: Structurally validated public message body.
+        agent: Selected dataset service with the existing privacy boundary.
+
+    Returns:
+        The unchanged message after dataset-aware validation.
+    """
+    agent.validate_message(payload.message)
+    return payload

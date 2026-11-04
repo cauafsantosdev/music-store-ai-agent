@@ -21,7 +21,7 @@ from langgraph.types import Command
 from sqlalchemy import Engine
 
 from music_store_agent.agent.config import AgentSettings, load_settings
-from music_store_agent.agent.demo import verify_demo
+from music_store_agent.agent.demo import dataset_mode, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
 from music_store_agent.agent.memory import ConversationStore, create_state_store
 from music_store_agent.agent.prompts import SYSTEM_PROMPT
@@ -82,12 +82,20 @@ def create_store_agent(
         AgentFailure: If data provenance, API key, or model configuration is invalid.
     """
     settings = settings or load_settings()
+    if dataset_mode(engine) != settings.ai_dataset_mode:
+        raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
     verify_demo(engine)
     model = model if model is not None else create_live_model(settings)
     owns_store = state_store is None
     if state_store is None:
-        state_store = create_state_store(settings.ai_state_schema)
+        state_store = (
+            create_state_store(settings.ai_state_schema, dataset_mode="challenge")
+            if settings.ai_dataset_mode == "challenge"
+            else create_state_store(settings.ai_state_schema)
+        )
     else:
+        if state_store.dataset_mode != settings.ai_dataset_mode:
+            raise AgentFailure(ErrorCode.SESSION_UNVERIFIED)
         state_store.check_ready()
 
     @wrap_model_call

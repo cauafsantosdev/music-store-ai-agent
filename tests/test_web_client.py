@@ -348,3 +348,98 @@ def test_transport_failures_do_not_retry_or_leak_diagnostics(
     assert raised.value.ambiguous
     assert "private-transport-marker" not in str(raised.value)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "reference,accepted",
+    [
+        ("2eac6ff4-e1aa-4372-aae0-705fc6512280", True),
+        ("private-header-marker" * 100, False),
+        ("2eac6ff4-e1aa-1372-aae0-705fc6512280", False),
+    ],
+)
+def test_response_request_references_are_bounded_and_validated(
+    monkeypatch: pytest.MonkeyPatch,
+    reference: str,
+    accepted: bool,
+) -> None:
+    """Retain only UUID4 correlation metadata without exposing arbitrary error headers.
+
+    Args:
+        monkeypatch: Controlled HTTP transport without network access.
+        reference: Valid correlation or untrusted response header value.
+        accepted: Whether the header is safe for display as a support reference.
+    """
+
+    def respond(
+        transport: httpx.HTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        """Return a sanitized HTTP failure with controlled correlation metadata.
+
+        Args:
+            transport: Unused HTTP transport.
+            request: Synthetic SSE request.
+
+        Returns:
+            A provider-unavailable response, without raw error data in feedback.
+        """
+        return httpx.Response(
+            503,
+            request=request,
+            headers={"X-Request-ID": reference},
+            json={"error": {"message": "private-error-marker"}},
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    with BackendClient(FrontendSettings()) as client:
+        with pytest.raises(ClientError) as raised:
+            client.stream_reply(capability(), "Consulta fictícia.", lambda: None)
+        assert client.request_id == (reference if accepted else None)
+    assert "private-" not in str(raised.value)
+
+
+def test_transport_failure_cannot_reuse_the_creation_request_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Avoid attributing a failed message to the preceding creation request.
+
+    Args:
+        monkeypatch: Controlled creation response followed by a transport failure.
+    """
+    reference = "2eac6ff4-e1aa-4372-aae0-705fc6512280"
+    cap = capability()
+
+    def respond(
+        transport: httpx.HTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        """Create one synthetic capability, then simulate a pre-header disconnect.
+
+        Args:
+            transport: Unused HTTP transport.
+            request: Explicit synthetic creation or message request.
+
+        Returns:
+            The controlled creation response.
+
+        Raises:
+            httpx.ReadTimeout: For the subsequent message request only.
+        """
+        if request.url.path == "/api/v1/conversations":
+            return httpx.Response(
+                201,
+                request=request,
+                headers={"X-Request-ID": reference},
+                json={
+                    "conversation_id": str(cap.conversation_id),
+                    "access_token": cap.access_token.get_secret_value(),
+                },
+            )
+        raise httpx.ReadTimeout("private-disconnect-marker", request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    with BackendClient(FrontendSettings()) as client:
+        created = client.create_conversation()
+        assert client.request_id == reference
+        with pytest.raises(ClientError):
+            client.stream_reply(created, "Consulta fictícia.", lambda: None)
+        assert client.request_id is None

@@ -1,10 +1,12 @@
 """Lazy environment configuration for GroqCloud and bounded execution."""
 
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from music_store_agent.agent.datasets import DatasetMode
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
 
 
@@ -15,8 +17,10 @@ class AgentSettings(BaseSettings):
 
     ai_model: Literal["openai/gpt-oss-120b"] = "openai/gpt-oss-120b"
     groq_api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    ai_dataset_mode: DatasetMode = "sample"
+    ai_challenge_directory: Path = Path("/run/music-store/challenge")
     ai_demo_schema: str = Field(
-        default="agent_demo", pattern=r"^agent_demo(?:_[a-z0-9_]+)?$"
+        default="agent_demo", pattern=r"^agent_demo(?:_[a-z0-9_]+)?$", max_length=63
     )
     ai_state_schema: str = Field(
         default="agent_state", pattern=r"^agent_state(?:_[a-z0-9_]+)?$", max_length=63
@@ -27,6 +31,46 @@ class AgentSettings(BaseSettings):
     ai_max_output_tokens: int = Field(default=2048, ge=256, le=4096)
     ai_provider_timeout_seconds: float = Field(default=30, ge=5, le=60)
     ai_max_history_messages: int = Field(default=60, ge=8, le=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def dataset_namespaces(cls, values: dict[str, object]) -> dict[str, object]:
+        """Choose independent operational and checkpoint defaults for each mode.
+
+        Args:
+            values: Explicit fields and environment settings, never logged.
+
+        Returns:
+            Settings with mode-specific defaults for omitted or blank schemas.
+        """
+        values = dict(values)
+        suffix = "_challenge" if values.get("ai_dataset_mode") == "challenge" else ""
+        for field, base in (
+            ("ai_demo_schema", "agent_demo"),
+            ("ai_state_schema", "agent_state"),
+        ):
+            if values.get(field) in (None, ""):
+                values[field] = base + suffix
+        return values
+
+    @model_validator(mode="after")
+    def separate_operational_data(self) -> "AgentSettings":
+        """Reject cross-mode reuse of the reserved operational schema defaults.
+
+        Returns:
+            Validated configuration without touching PostgreSQL.
+
+        Raises:
+            ValueError: If a reserved operational schema belongs to another mode.
+        """
+        forbidden = (
+            "agent_demo"
+            if self.ai_dataset_mode == "challenge"
+            else "agent_demo_challenge"
+        )
+        if self.ai_demo_schema == forbidden:
+            raise ValueError("Operational schema belongs to another dataset mode.")
+        return self
 
 
 def load_settings() -> AgentSettings:

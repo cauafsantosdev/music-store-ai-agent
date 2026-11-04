@@ -22,7 +22,7 @@ class MessageRequest(EmptyRequest):
     @field_validator("message")
     @classmethod
     def validate_message(cls, value: str) -> str:
-        """Apply the service's privacy and blank-input checks before execution.
+        """Check shape and phone privacy before dataset-aware dependency validation.
 
         Args:
             value: Untrusted customer text.
@@ -30,7 +30,7 @@ class MessageRequest(EmptyRequest):
         Returns:
             Unchanged text for normal service processing.
         """
-        _validate_message(value)
+        _validate_message(value, check_contacts=False)
         return value
 
 

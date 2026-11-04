@@ -14,6 +14,7 @@ from psycopg import Connection, Error, sql
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
+from music_store_agent.agent.datasets import CHALLENGE_FINGERPRINT, DatasetMode
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
 
 REQUIRED_TABLES: frozenset[str] = frozenset(
@@ -36,19 +37,28 @@ class ConversationStore:
 
     schema: str
     pool: ConnectionPool[Connection[DictRow]]
+    dataset_mode: DatasetMode
 
-    def __init__(self, schema: str = "agent_state") -> None:
+    def __init__(
+        self, schema: str = "agent_state", *, dataset_mode: DatasetMode = "sample"
+    ) -> None:
         """Open the state pool without creating or migrating any tables.
 
         Args:
             schema: Trusted deployment setting, never a customer-provided value.
+            dataset_mode: Capability digest domain; legacy conversations remain sample.
 
         Raises:
             AgentFailure: If the namespace is unsafe or PostgreSQL is unavailable.
         """
-        if len(schema) > 63 or not re.fullmatch(r"agent_state(?:_[a-z0-9_]+)?", schema):
+        if (
+            dataset_mode not in ("sample", "challenge")
+            or len(schema) > 63
+            or not re.fullmatch(r"agent_state(?:_[a-z0-9_]+)?", schema)
+        ):
             raise AgentFailure(ErrorCode.CONFIGURATION)
         self.schema = schema
+        self.dataset_mode = dataset_mode
         self.pool = ConnectionPool(
             conninfo="",
             min_size=1,
@@ -194,7 +204,7 @@ class ConversationStore:
             connection.execute(
                 "INSERT INTO conversations (conversation_id, access_token_hash) "
                 "VALUES (%s, %s)",
-                (identifier, hashlib.sha256(token.encode()).digest()),
+                (identifier, self._capability_digest(token)),
             )
         return identifier, token
 
@@ -220,7 +230,7 @@ class ConversationStore:
             raise AgentFailure(ErrorCode.SESSION_UNVERIFIED) from None
         if not isinstance(token, str) or len(token) > 256:
             raise AgentFailure(ErrorCode.SESSION_UNVERIFIED)
-        digest = hashlib.sha256(token.encode()).digest()
+        digest = self._capability_digest(token)
         with self.transaction() as connection:
             # Reject invalid capabilities before lock contention can reveal whether
             # a conversation is busy. Recheck under lock to account for deletion.
@@ -235,6 +245,26 @@ class ConversationStore:
                 if row is None or not verified:
                     raise AgentFailure(ErrorCode.SESSION_UNVERIFIED)
             yield connection
+
+    def _capability_digest(self, token: str) -> bytes:
+        """Bind challenge capabilities to the approved dataset without altering tables.
+
+        Sample hashes retain their original format. Challenge hashes use a fixed
+        domain and baseline pin, preventing cross-dataset resume even if a deployment
+        explicitly reuses a state schema. Raw tokens are never persisted.
+
+        Args:
+            token: Unlogged bearer capability.
+
+        Returns:
+            A 32-byte SHA-256 digest for constant-time authorization checks.
+        """
+        prefix = (
+            f"music-store:challenge:{CHALLENGE_FINGERPRINT}\0"
+            if self.dataset_mode == "challenge"
+            else ""
+        )
+        return hashlib.sha256((prefix + token).encode()).digest()
 
     def delete(self, identifier: UUID | str, token: str) -> None:
         """Atomically remove authorized metadata and every native checkpoint row.
@@ -251,11 +281,14 @@ class ConversationStore:
             )
 
 
-def create_state_store(schema: str) -> ConversationStore:
+def create_state_store(
+    schema: str, *, dataset_mode: DatasetMode = "sample"
+) -> ConversationStore:
     """Open and validate an initialized store without implicit DDL.
 
     Args:
         schema: Validated deployment-controlled namespace.
+        dataset_mode: Explicit authorized operational dataset.
 
     Returns:
         An open store owned by the caller.
@@ -263,7 +296,7 @@ def create_state_store(schema: str) -> ConversationStore:
     Raises:
         AgentFailure: If initialization is missing or database access fails.
     """
-    store = ConversationStore(schema)
+    store = ConversationStore(schema, dataset_mode=dataset_mode)
     try:
         store.check_ready()
         return store

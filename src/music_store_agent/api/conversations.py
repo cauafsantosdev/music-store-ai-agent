@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator
+from time import perf_counter
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
@@ -14,6 +15,7 @@ from music_store_agent.api.dependencies import (
     authorized_conversation,
     get_agent,
     reject_query_parameters,
+    validated_message,
 )
 from music_store_agent.api.errors import APIError, checked_reply
 from music_store_agent.api.schemas import (
@@ -23,6 +25,7 @@ from music_store_agent.api.schemas import (
     ErrorResponse,
     MessageRequest,
 )
+from music_store_agent.observability import emit
 
 router = APIRouter(
     prefix="/api/v1/conversations",
@@ -80,7 +83,7 @@ def get_history(
 
 @router.post("/{conversation_id}/messages", response_model=AgentReply)
 def send_message(
-    payload: MessageRequest,
+    payload: Annotated[MessageRequest, Depends(validated_message)],
     conversation: Annotated[Conversation, Depends(authorized_conversation)],
     agent: Annotated[StoreAgent, Depends(get_agent)],
 ) -> AgentReply:
@@ -127,7 +130,7 @@ def event_frame(event: str, payload: dict[str, object]) -> str:
     responses={200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}},
 )
 async def stream_message(
-    payload: MessageRequest,
+    payload: Annotated[MessageRequest, Depends(validated_message)],
     conversation: Annotated[Conversation, Depends(authorized_conversation)],
     agent: Annotated[StoreAgent, Depends(get_agent)],
 ) -> StreamingResponse:
@@ -153,37 +156,59 @@ async def stream_message(
         Yields:
             Status, completed message/error and done frames, never raw tool events.
         """
-        yield event_frame("status", {"status": "processing"})
-        failure: APIError | None = None
-        reply: AgentReply | None = None
+        started = perf_counter()
+        completed = False
+        outcome: str | None = None
+        calls: int | None = None
         try:
-            # Default thread offloading waits for bounded transactional work instead
-            # of abandoning an indefinitely running background task on disconnect.
-            reply = checked_reply(
-                await run_in_threadpool(
-                    agent.send_message,
-                    conversation.conversation_id,
-                    conversation.access_token,
-                    payload.message,
+            yield event_frame("status", {"status": "processing"})
+            failure: APIError | None = None
+            reply: AgentReply | None = None
+            try:
+                # Native messages streaming can emit text before late tool calls;
+                # node metadata does not identify a final customer-facing answer.
+                # Keep one invocation and expose only its committed terminal text.
+                # Default offloading waits for transactional work after disconnect;
+                # no separate execution or detached producer is created.
+                reply = checked_reply(
+                    await run_in_threadpool(
+                        agent.send_message,
+                        conversation.conversation_id,
+                        conversation.access_token,
+                        payload.message,
+                    )
                 )
+            except AgentFailure as error:
+                failure = APIError(error.code.value)
+            except APIError as error:
+                failure = error
+            except Exception:
+                failure = APIError("internal_error")
+            outcome = (
+                failure.code if failure else reply.code if reply else "internal_error"
             )
-        except AgentFailure as error:
-            failure = APIError(error.code.value)
-        except APIError as error:
-            failure = error
-        except Exception:
-            failure = APIError("internal_error")
-        if failure is not None:
-            yield event_frame(
-                "error",
-                {
-                    **failure.envelope().model_dump(),
-                    "status_code": failure.status_code,
-                },
+            calls = reply.tool_calls if reply else None
+            if failure is not None:
+                yield event_frame(
+                    "error",
+                    {
+                        **failure.envelope().model_dump(),
+                        "status_code": failure.status_code,
+                    },
+                )
+            elif reply is not None:
+                yield event_frame("message", reply.model_dump())
+            yield event_frame("done", {"status": "failed" if failure else "completed"})
+            completed = True
+        finally:
+            emit(
+                "sse_delivery",
+                duration_ms=(perf_counter() - started) * 1000,
+                status_code=200,
+                outcome=outcome,
+                tool_calls=calls,
+                delivery="completed" if completed else "interrupted",
             )
-        elif reply is not None:
-            yield event_frame("message", reply.model_dump())
-        yield event_frame("done", {"status": "failed" if failure else "completed"})
 
     return StreamingResponse(
         events(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"}

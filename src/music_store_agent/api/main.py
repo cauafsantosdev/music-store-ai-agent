@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException
 from music_store_agent.agent.config import AgentSettings
 from music_store_agent.agent.errors import AgentFailure
 from music_store_agent.agent.memory import ConversationStore
+from music_store_agent.api.browser_sessions import router as browser_router
 from music_store_agent.api.conversations import router
 from music_store_agent.api.dependencies import AppResources, get_resources
 from music_store_agent.api.errors import (
@@ -72,6 +73,7 @@ def create_app(
     application.add_exception_handler(ResponseValidationError, handle_validation_error)
     application.add_exception_handler(HTTPException, handle_http_error)
     application.include_router(router)
+    application.include_router(browser_router)
 
     @application.get("/health")
     async def health() -> dict[str, str]:

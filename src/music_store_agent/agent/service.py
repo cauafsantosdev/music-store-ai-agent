@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable
+from time import perf_counter
 from typing import Literal
 from uuid import UUID
 
@@ -14,12 +15,15 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langsmith import tracing_context
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
 
 from music_store_agent.agent.config import AgentSettings
-from music_store_agent.agent.demo import verify_demo
+from music_store_agent.agent.demo import dataset_mode, verified_snapshot, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode, provider_failure
 from music_store_agent.agent.memory import ConversationStore
+from music_store_agent.database.models import Customer
+from music_store_agent.observability import emit
 
 
 class AgentReply(BaseModel, frozen=True):
@@ -37,7 +41,9 @@ class HistoryMessage(BaseModel, frozen=True):
     text: str
 
 
-def _validate_message(message: str) -> None:
+def _validate_message(
+    message: str, engine: Engine | None = None, *, check_contacts: bool = True
+) -> None:
     """Bound demonstration input and reject ordinary real email/phone values.
 
     This guard is not a general PII classifier. Private documents and real
@@ -45,14 +51,27 @@ def _validate_message(message: str) -> None:
 
     Args:
         message: Untrusted user text.
+        engine: Explicit challenge engine for exact approved synthetic email checks.
+        check_contacts: Whether to apply dataset-specific email validation as well.
 
     Raises:
         AgentFailure: If input is invalid, oversized, or contains real contacts.
     """
     if not isinstance(message, str) or not message.strip() or len(message) > 2000:
         raise AgentFailure(ErrorCode.INVALID_INPUT)
-    for domain in re.findall(r"[^\s@]+@([\w.-]+)", message):
-        if domain.casefold().rstrip(".") != "example.test":
+    emails = re.findall(r"[^\s@]+@[\w.-]+", message) if check_contacts else []
+    allowed: set[str] | None = None
+    if emails and engine is not None and dataset_mode(engine) == "challenge":
+        with verified_snapshot(engine) as bind, Session(bind) as session:
+            allowed = {
+                email.strip().casefold()
+                for email in session.scalars(select(Customer.email))
+            }
+    for email in emails:
+        if (allowed is not None and email.casefold().rstrip(".") not in allowed) or (
+            allowed is None
+            and email.rsplit("@", 1)[-1].casefold().rstrip(".") != "example.test"
+        ):
             raise AgentFailure(ErrorCode.INVALID_INPUT)
     if re.search(r"(?<!\w)\+?\d[\d ()-]{8,}\d(?!\w)", message):
         raise AgentFailure(ErrorCode.INVALID_INPUT)
@@ -212,6 +231,18 @@ class StoreAgent:
         identifier, token = self._store.create()
         return Conversation(self, identifier, token)
 
+    def validate_message(self, message: str) -> None:
+        """Validate privacy against the selected dataset before HTTP/SSE execution.
+
+        Args:
+            message: Untrusted customer input; never included in diagnostics.
+
+        Raises:
+            AgentFailure: If input is invalid or provenance cannot be verified.
+        """
+        self._ensure_open()
+        _validate_message(message, self._engine)
+
     def new_conversation(self) -> Conversation:
         """Preserve the original creation interface using durable storage.
 
@@ -257,9 +288,10 @@ class StoreAgent:
         Returns:
             Success only after commit; failure leaves prior history intact.
         """
+        started = perf_counter()
         try:
             self._ensure_open()
-            _validate_message(message)
+            self.validate_message(message)
             with self._store.authorized(
                 conversation_id, _token_value(access_token)
             ) as connection:
@@ -296,6 +328,13 @@ class StoreAgent:
                     "WHERE conversation_id = %s",
                     (UUID(str(conversation_id)),),
                 )
+            # Success is observable only after the transaction context commits.
+            emit(
+                "agent_turn",
+                duration_ms=(perf_counter() - started) * 1000,
+                outcome=reply.code,
+                tool_calls=reply.tool_calls,
+            )
             return reply
         except (
             GraphRecursionError,
@@ -307,6 +346,12 @@ class StoreAgent:
             error = failure
         except Exception as failure:
             error = provider_failure(failure)
+        emit(
+            "agent_turn",
+            duration_ms=(perf_counter() - started) * 1000,
+            outcome=error.code.value,
+            tool_calls=0,
+        )
         return AgentReply(text=str(error), code=error.code.value)
 
     def native_history(

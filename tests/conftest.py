@@ -12,6 +12,18 @@ from sqlalchemy.schema import DropSchema
 from music_store_agent.database.session import create_database_engine, initialize_schema
 
 
+@pytest.fixture(autouse=True)
+def sample_test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep public tests independent of the selected local application dataset.
+
+    Args:
+        monkeypatch: Scoped defaults; challenge tests select their mode explicitly.
+    """
+    monkeypatch.setenv("AI_DATASET_MODE", "sample")
+    monkeypatch.setenv("AI_DEMO_SCHEMA", "")
+    monkeypatch.setenv("AI_STATE_SCHEMA", "")
+
+
 @pytest.fixture
 def database_engine() -> Iterator[Engine]:
     """Provide an empty unique namespace and remove only that namespace afterward.

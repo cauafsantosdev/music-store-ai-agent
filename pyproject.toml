@@ -5,6 +5,7 @@ description = "Customer support AI agent for Empório da Música."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "cryptography>=46,<51",
     "fastapi>=0.115,<1.0",
     "httpx>=0.28,<1.0",
     "langchain>=1.4.8,<2",
@@ -15,7 +16,7 @@ dependencies = [
     "pydantic-settings>=2.6,<3.0",
     "pypdf>=6.21.4",
     "sqlalchemy>=2.0,<3.0",
-    "streamlit>=1.40,<2.0",
+    "streamlit>=1.66.1,<2.0",
     "uvicorn>=0.32,<1.0",
 ]
 

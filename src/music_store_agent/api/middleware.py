@@ -1,8 +1,12 @@
-"""Bound request bodies and sanitize unexpected failures without buffering SSE."""
+"""Bound requests and correlate safe metrics without buffering SSE."""
+
+from time import perf_counter
+from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from music_store_agent.api.errors import APIError, error_response
+from music_store_agent.observability import REQUEST_ID, emit
 
 # Allow 2000 characters even when JSON encodes non-BMP values as surrogate pairs.
 MAX_BODY_BYTES: int = 32_768
@@ -20,6 +24,67 @@ class RequestGuard:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Generate request correlation and measure complete ASGI delivery.
+
+        Caller-supplied request IDs are deliberately ignored. Context propagates
+        into supported worker offloading and is reset even after cancellation.
+
+        Args:
+            scope: ASGI connection scope; paths and queries are never logged.
+            receive: Incoming ASGI messages.
+            send: Outgoing frames, forwarded without retaining response bodies.
+        """
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        identifier = str(uuid4())
+        context = REQUEST_ID.set(identifier)
+        started = perf_counter()
+        status: int | None = None
+        completed = False
+
+        async def correlated_send(message: Message) -> None:
+            """Add one correlation header and track actual response completion.
+
+            Args:
+                message: Current outgoing frame, never logged or buffered.
+            """
+            nonlocal status, completed
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                headers = [
+                    (key, value)
+                    for key, value in message.get("headers", [])
+                    if key.lower() != b"x-request-id"
+                ]
+                message = {
+                    **message,
+                    "headers": headers
+                    + [(b"x-request-id", identifier.encode("ascii"))],
+                }
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get(
+                "more_body", False
+            ):
+                completed = True
+
+        try:
+            await self._http(scope, receive, correlated_send)
+        finally:
+            try:
+                route = getattr(scope.get("route"), "path", "unmatched")
+                emit(
+                    "http_request",
+                    method=scope.get("method", "OTHER"),
+                    route=route,
+                    status_code=status,
+                    duration_ms=(perf_counter() - started) * 1000,
+                    delivery="completed" if completed else "interrupted",
+                )
+            finally:
+                REQUEST_ID.reset(context)
+
+    async def _http(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Check request size and append no-store headers without logging payloads.
 
         Args:
@@ -27,11 +92,8 @@ class RequestGuard:
             receive: Incoming ASGI messages.
             send: Outgoing ASGI messages.
         """
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
         path = scope.get("path", "")
-        protected = path.startswith("/api/") or path == "/ready"
+        protected = path.startswith(("/api/", "/browser-session/")) or path == "/ready"
         started = False
 
         async def safe_send(message: Message) -> None:
@@ -55,14 +117,22 @@ class RequestGuard:
                         + [
                             (b"cache-control", b"no-store"),
                             (b"pragma", b"no-cache"),
-                            (b"vary", b"Authorization"),
+                            (
+                                b"vary",
+                                b"Origin, Authorization"
+                                if path.startswith("/browser-session/")
+                                else b"Authorization",
+                            ),
                         ],
                     }
             await send(message)
 
         try:
             incoming = receive
-            if path.startswith("/api/") and scope.get("method") == "POST":
+            if (
+                path.startswith(("/api/", "/browser-session/"))
+                and scope.get("method") == "POST"
+            ):
                 chunks: list[bytes] = []
                 size = 0
                 for key, value in scope.get("headers", []):

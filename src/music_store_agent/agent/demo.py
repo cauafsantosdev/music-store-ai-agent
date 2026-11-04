@@ -12,6 +12,12 @@ from typing import cast
 from sqlalchemy import Connection, Engine, func, insert, inspect, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from music_store_agent.agent.config import AgentSettings
+from music_store_agent.agent.datasets import (
+    CHALLENGE_CHECKSUMS,
+    CHALLENGE_FINGERPRINT,
+    DatasetMode,
+)
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
 from music_store_agent.data.ingestion import seed_data
 from music_store_agent.database.models import Base, Customer, Order
@@ -41,6 +47,70 @@ SOURCE_CHECKSUMS: dict[str, str] = {
 DEMO_FINGERPRINT: str = (
     "054624a8352e5dc22511c22a822d08f22ef48749e59c80d3d801f5fca17cfdf0"
 )
+
+
+def dataset_mode(bind: Engine | Connection) -> DatasetMode:
+    """Read explicit trusted engine selection without consulting mutable environment.
+
+    Args:
+        bind: Operational engine or its active transaction.
+
+    Returns:
+        Explicit challenge selection, otherwise the original sample default.
+
+    Raises:
+        AgentFailure: If an unsupported mode is attached to the engine.
+    """
+    mode = bind.get_execution_options().get("ai_dataset_mode", "sample")
+    if mode not in ("sample", "challenge"):
+        raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
+    return cast(DatasetMode, mode)
+
+
+def select_dataset(engine: Engine, settings: AgentSettings) -> Engine:
+    """Attach explicit mode and mounted source selection to a deployment engine.
+
+    Args:
+        engine: Engine already targeting the configured operational schema.
+        settings: Validated deployment configuration.
+
+    Returns:
+        The sample engine unchanged or a challenge engine with trusted options.
+    """
+    if settings.ai_dataset_mode == "sample":
+        return engine
+    return engine.execution_options(
+        ai_dataset_mode="challenge",
+        ai_challenge_directory=settings.ai_challenge_directory,
+    )
+
+
+def challenge_sources(bind: Engine | Connection) -> Path:
+    """Verify all seven approved source hashes before importing or authorizing tools.
+
+    Args:
+        bind: Explicit challenge engine with a read-only mounted source directory.
+
+    Returns:
+        The approved source root without exposing source contents.
+
+    Raises:
+        AgentFailure: If selection, file availability or any checksum is invalid.
+    """
+    if dataset_mode(bind) != "challenge":
+        raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
+    root = Path(
+        bind.get_execution_options().get(
+            "ai_challenge_directory", "/run/music-store/challenge"
+        )
+    )
+    try:
+        for filename, expected in CHALLENGE_CHECKSUMS.items():
+            if hashlib.sha256((root / filename).read_bytes()).hexdigest() != expected:
+                raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
+    except OSError:
+        raise AgentFailure(ErrorCode.DEMO_UNVERIFIED) from None
+    return root
 
 
 def _json_value(value: object) -> str:
@@ -161,12 +231,16 @@ def verified_snapshot(engine: Engine) -> Iterator[Engine]:
         AgentFailure: If data differs from the approved synthetic fixtures.
     """
     _schema(engine)
+    mode = dataset_mode(engine)
+    if mode == "challenge":
+        challenge_sources(engine)
+    expected = CHALLENGE_FINGERPRINT if mode == "challenge" else DEMO_FINGERPRINT
     try:
         with engine.connect().execution_options(
             isolation_level="REPEATABLE READ", postgresql_readonly=True
         ) as connection:
             with connection.begin():
-                if _fingerprint(connection) != DEMO_FINGERPRINT:
+                if _fingerprint(connection) != expected:
                     raise AgentFailure(ErrorCode.DEMO_UNVERIFIED)
                 # Session accepts Connection as a bind. Existing tool annotations
                 # name Engine; the cast preserves their implementation unchanged.
@@ -176,14 +250,14 @@ def verified_snapshot(engine: Engine) -> Iterator[Engine]:
 
 
 def initialize_demo(engine: Engine) -> None:
-    """Populate an empty demo schema exclusively from pinned public assets.
+    """Populate an empty selected schema exclusively from pinned synthetic assets.
 
-    Existing populated schemas must already match the baseline; private or modified
-    records are never overwritten. Original duplicate sample emails remain intact;
-    one additional synthetic association is cloned from a public sample order.
+    Existing populated schemas must already match the selected baseline; records
+    are never overwritten. Challenge mode imports the complete original dataset
+    and PDF. Sample mode retains its additional invented order association.
 
     Args:
-        engine: An explicit non-public engine; source files remain unchanged.
+        engine: Explicit mode and non-public schema; sources remain unchanged.
 
     Raises:
         AgentFailure: If sources differ, the schema is populated with other data,
@@ -191,6 +265,16 @@ def initialize_demo(engine: Engine) -> None:
     """
     schema = _schema(engine)
     try:
+        if dataset_mode(engine) == "challenge":
+            source = challenge_sources(engine)
+            with engine.connect() as connection:
+                populated = bool(inspect(connection).get_table_names(schema=schema))
+            if not populated:
+                initialize_schema(engine)
+                seed_data(engine, source)
+                index_policy_pdf(engine, source / "políticas_da_loja.pdf")
+            verify_demo(engine)
+            return
         for filename, expected in SOURCE_CHECKSUMS.items():
             if (
                 hashlib.sha256((SAMPLE_DIRECTORY / filename).read_bytes()).hexdigest()

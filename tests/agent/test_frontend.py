@@ -2,7 +2,7 @@
 
 import json
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from music_store_agent.agent.config import AgentSettings
 from music_store_agent.agent.memory import ConversationStore
 from music_store_agent.api.main import create_app
 from web.app import SUGGESTIONS
+from web.client import BackendClient, Capability, Reply
 from web.state import ChatState
 
 
@@ -68,7 +69,10 @@ class UIBackend:
         return httpx.Response(
             response.status_code,
             request=request,
-            headers={"content-type": response.headers.get("content-type", "")},
+            headers={
+                "content-type": response.headers.get("content-type", ""),
+                "x-request-id": response.headers.get("x-request-id", ""),
+            },
             content=content,
         )
 
@@ -121,6 +125,7 @@ def ui_backend(
 
         monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("BROWSER_SESSION_KEY", raising=False)
         yield bridge
 
 
@@ -496,3 +501,120 @@ def test_capability_echo_is_redacted_and_unavailable_status_stays_safe(
     assert state.capability is not None and len(app.chat_message) == 4
     assert "Serviço temporariamente indisponível" in visible_copy(app)
     assert "private-connection-marker" not in visible_copy(app) + caplog.text
+
+
+def test_processing_and_failed_turn_reference_preserve_one_submission(
+    ui_backend: UIBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe a real status callback and expose only a validated failure reference.
+
+    Args:
+        ui_backend: Real API and PostgreSQL with controlled provider timeout.
+        monkeypatch: Scoped observation of the existing complete-message workflow.
+    """
+    app = open_ui()
+    ui_backend.model.failure_code = 504
+    statuses: list[bool] = []
+    original = BackendClient.stream_reply
+
+    def observed(
+        self: BackendClient,
+        capability: Capability,
+        message: str,
+        on_status: Callable[[], None],
+    ) -> Reply:
+        """Observe pending state while forwarding the actual one-request SSE parser.
+
+        Args:
+            self: Action-scoped HTTP client.
+            capability: Session-local access material, never displayed.
+            message: Single synthetic user submission.
+            on_status: Actual Streamlit progress update.
+
+        Returns:
+            The canonical reply if the provider succeeds.
+        """
+
+        def pending() -> None:
+            """Check duplicate prevention during an actual backend processing event."""
+            state = app.session_state["music_store_chat"]
+            assert state.busy and state.action is None
+            on_status()
+            statuses.append(True)
+
+        return original(self, capability, message, pending)
+
+    monkeypatch.setattr(BackendClient, "stream_reply", observed)
+    app.chat_input[0].set_value("Consulta fictícia com timeout controlado.").run(
+        timeout=15
+    )
+    assert not app.exception and statuses == [True]
+    state = app.session_state["music_store_chat"]
+    assert state.error.code == "provider_timeout" and state.error.request_id
+    assert f"Referência do atendimento: {state.error.request_id}" in visible_copy(app)
+    assert "Solicitação não confirmada" in visible_copy(app)
+    assert "Resposta confirmada" not in visible_copy(app)
+    assert "private-diagnostic-marker" not in visible_copy(app)
+    assert len(app.chat_message) == 1 and app.chat_input[0].disabled
+    app.run(timeout=15)
+    assert len(ui_backend.requests) == 2 and len(ui_backend.model.seen) == 1
+    app.button(key="refresh_history").click().run(timeout=15)
+    assert not state.needs_refresh and not app.chat_message
+    assert len(ui_backend.requests) == 3 and ui_backend.requests[-1].method == "GET"
+
+
+def test_new_streamlit_state_restores_authorized_history_without_inference(
+    ui_backend: UIBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconstruct browser state from HttpOnly recovery and read canonical history once.
+
+    Args:
+        ui_backend: Existing real API/SQL bridge with controlled inference.
+        monkeypatch: Public cookie-reader boundary and explicit test configuration.
+    """
+    from cryptography.fernet import Fernet
+
+    from music_store_agent.browser_session import COOKIE_NAME
+
+    monkeypatch.setenv("BROWSER_SESSION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("BROWSER_APP_ORIGIN", "http://localhost:8501")
+    monkeypatch.setenv("BROWSER_SESSION_API_ORIGIN", "http://localhost:8000")
+    monkeypatch.setenv("BROWSER_SESSION_ALLOW_HTTP_LOCALHOST", "true")
+    response = ui_backend.client.post(
+        "/browser-session/start",
+        headers={
+            "Origin": "http://localhost:8501",
+            "X-Browser-Session": "1",
+        },
+        json={"revision": "30f92243-4ac8-4a5c-9698-354506075795"},
+    )
+    assert response.status_code == 200
+    cookie = response.cookies[COOKIE_NAME]
+
+    def read_cookie() -> str:
+        """Represent the server-side handshake cookie without a writable cookie API.
+
+        Returns:
+            Opaque test ciphertext, never a widget or browser-side capability.
+        """
+        return cookie
+
+    monkeypatch.setattr("web.browser_session.handshake_cookie", read_cookie)
+    first = open_ui()
+    first.chat_input[0].set_value("Consulta fictícia persistente.").run(timeout=15)
+    capability = first.session_state["music_store_chat"].capability
+    before = len(ui_backend.model.seen)
+    reconstructed = open_ui()
+    state = reconstructed.session_state["music_store_chat"]
+    assert state.capability == capability and state.browser_ready
+    assert len(reconstructed.chat_message) == 2
+    assert "Consulta fictícia persistente" in visible_copy(reconstructed)
+    assert len(ui_backend.model.seen) == before == 1
+    assert ui_backend.requests[-1].method == "GET"
+    assert cookie not in visible_copy(reconstructed)
+    assert capability.access_token.get_secret_value() not in visible_copy(reconstructed)
+    requests = len(ui_backend.requests)
+    reconstructed.run(timeout=15)
+    assert len(ui_backend.requests) == requests

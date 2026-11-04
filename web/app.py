@@ -1,8 +1,12 @@
 """Portuguese dark-themed chat using only the public FastAPI HTTP interface."""
 
+import os
+from uuid import uuid4
+
 import streamlit as st
 from pydantic import ValidationError
 
+from web.browser_session import prepare_browser_session
 from web.client import BackendClient, FrontendSettings
 from web.state import Action, ChatState
 
@@ -24,6 +28,15 @@ SUGGESTIONS: tuple[tuple[str, str], ...] = (
             "Qual é o status do pedido fictício 303, associado ao email "
             "customer-203@example.test?"
         ),
+    ),
+)
+CHALLENGE_SUGGESTIONS: tuple[tuple[str, str], ...] = (
+    ("Instrumentos disponíveis", "Quais violões estão disponíveis?"),
+    ("Promoções e PIX", "Quais instrumentos têm promoção ativa?"),
+    ("Envio e pagamentos", "Quais são as formas de pagamento e as regras de envio?"),
+    (
+        "Pedido fictício",
+        "Quais dados são necessários para consultar um pedido fictício?",
     ),
 )
 
@@ -54,7 +67,11 @@ def new_conversation() -> None:
     """Reset local state without deleting the previous backend conversation."""
     state = chat_state()
     if not state.busy:
-        state.reset()
+        if state.browser_persistent:
+            state.browser_operation = "new"
+            state.browser_revision = str(uuid4())
+        else:
+            state.reset()
 
 
 def queue_action(action: Action) -> None:
@@ -180,7 +197,9 @@ def render_welcome(state: ChatState) -> None:
     )
     st.caption("Escolha uma sugestão ou escreva sua pergunta abaixo.")
     columns = st.columns(2)
-    for index, (label, question) in enumerate(SUGGESTIONS):
+    challenge = os.getenv("AI_DATASET_MODE", "sample") == "challenge"
+    suggestions = CHALLENGE_SUGGESTIONS if challenge else SUGGESTIONS
+    for index, (label, question) in enumerate(suggestions):
         with columns[index % 2]:
             st.button(
                 label,
@@ -190,10 +209,11 @@ def render_welcome(state: ChatState) -> None:
                 width="stretch",
                 disabled=state.busy or state.action is not None or state.needs_refresh,
             )
-    st.caption(
-        "O exemplo de rastreio usa exclusivamente o pedido 303 e o "
-        "email customer-203@example.test, ambos fictícios."
-    )
+    if not challenge:
+        st.caption(
+            "O exemplo de rastreio usa exclusivamente o pedido 303 e o "
+            "email customer-203@example.test, ambos fictícios."
+        )
 
 
 def render_messages(state: ChatState) -> None:
@@ -208,7 +228,7 @@ def render_messages(state: ChatState) -> None:
             "user" if user else "assistant",
             avatar=":material/person:" if user else ":material/music_note:",
         ):
-            st.caption("Você" if user else "Assistente virtual")
+            st.caption("Você" if user else "Assistente virtual · Resposta confirmada")
             st.markdown(state.visible_text(message.text), unsafe_allow_html=False)
     if state.submitted is not None:
         with st.chat_message("user", avatar=":material/person:"):
@@ -216,6 +236,7 @@ def render_messages(state: ChatState) -> None:
             st.markdown(state.visible_text(state.submitted), unsafe_allow_html=False)
             if state.error:
                 st.caption("Solicitação não confirmada.")
+                st.caption("Confira o histórico antes de reenviar esta mensagem.")
 
 
 def execute_action(state: ChatState, settings: FrontendSettings) -> None:
@@ -231,11 +252,17 @@ def execute_action(state: ChatState, settings: FrontendSettings) -> None:
         "delete": "Excluindo conversa...",
         "status": "Verificando conexão...",
     }[state.action]
-    with st.status(label, expanded=False) as progress:
+    sending = state.action == "send"
+    with st.status(label, expanded=sending) as progress:
+        if sending:
+            st.write(
+                "A consulta pode levar alguns instantes. A resposta completa "
+                "aparecerá após a confirmação do histórico."
+            )
 
         def processing() -> None:
             """Display fixed progress text rather than untrusted SSE status strings."""
-            progress.update(label="Consultando informações...")
+            progress.update(label="Consulta em andamento...", expanded=True)
 
         with BackendClient(settings) as client:
             state.execute(client, processing)
@@ -262,6 +289,8 @@ def main() -> None:
         st.error("A conexão com o atendimento ainda não está configurada corretamente.")
         return
     state = chat_state()
+    if not prepare_browser_session(state, settings):
+        return
     if state.busy:
         # A consumed request interrupted by a rerun must never be replayed.
         state.interrupt()
@@ -271,6 +300,8 @@ def main() -> None:
     render_messages(state)
     if state.error:
         st.error(str(state.error))
+        if state.error.request_id:
+            st.caption(f"Referência do atendimento: {state.error.request_id}")
         if state.needs_refresh:
             st.info(
                 "Atualize o histórico para confirmar o resultado ou inicie uma "

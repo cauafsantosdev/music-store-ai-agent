@@ -1,0 +1,19 @@
+# Explicit opt-in: docker compose -f compose.yaml -f compose.challenge.yaml ...
+# Sources remain outside image layers and are required only by this override.
+services:
+  api:
+    environment:
+      AI_DATASET_MODE: challenge
+      AI_DEMO_SCHEMA: ${AI_CHALLENGE_SCHEMA:-agent_demo_challenge}
+      AI_STATE_SCHEMA: ${AI_CHALLENGE_STATE_SCHEMA:-agent_state_challenge}
+      AI_CHALLENGE_DIRECTORY: /run/music-store/challenge
+    volumes:
+      - type: bind
+        source: ${CHALLENGE_SOURCE_DIRECTORY:-./data/private}
+        target: /run/music-store/challenge
+        read_only: true
+        bind:
+          create_host_path: false
+  web:
+    environment:
+      AI_DATASET_MODE: challenge
