@@ -1,0 +1,116 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, tests and offline evaluations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Ignore local dotenv files and isolate containers, networks and volumes.
+      COMPOSE_FILE: compose.yaml
+      COMPOSE_DISABLE_ENV_FILE: "1"
+      COMPOSE_PROJECT_NAME: music-store-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      POSTGRES_DB: music_store_ci
+      POSTGRES_USER: music_store_ci
+      POSTGRES_PASSWORD: ci-only-disposable-password
+      API_PORT: "0"
+      WEB_PORT: "0"
+      BACKEND_URL: http://api:8000
+      # /ready checks key presence only. This invalid placeholder cannot authenticate
+      # and is removed from test/evaluation processes below. No secrets are needed.
+      GROQ_API_KEY: ci-placeholder-not-a-real-key
+      RUN_LIVE_GROQ: "0"
+      RUN_LIVE_GROQ_EVAL: "0"
+      LANGSMITH_TRACING: "false"
+      LANGCHAIN_TRACING_V2: "false"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build API and web images
+        run: docker compose build
+
+      - name: Start services and wait for health checks
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: Initialize verified synthetic data and checkpoints
+        run: |
+          docker compose exec -T api uv run --no-sync python -m music_store_agent.agent.cli --init-demo
+          docker compose exec -T api uv run --no-sync python -m music_store_agent.agent.cli --init-state
+
+      - name: Check Ruff lint
+        run: docker compose exec -T api uv run --no-sync ruff check .
+
+      - name: Check Ruff formatting
+        run: docker compose exec -T api uv run --no-sync ruff format --check .
+
+      - name: Verify dependency lockfile
+        run: docker compose exec -T api uv lock --check
+
+      - name: Run full offline test suite
+        run: >-
+          docker compose exec -T
+          -e GROQ_API_KEY=
+          -e RUN_LIVE_GROQ=0 -e RUN_LIVE_GROQ_EVAL=0
+          -e LANGSMITH_TRACING=false -e LANGCHAIN_TRACING_V2=false
+          api uv run --no-sync pytest -q
+
+      - name: Run offline agent evaluations
+        run: >-
+          docker compose exec -T
+          -e GROQ_API_KEY=
+          -e RUN_LIVE_GROQ=0 -e RUN_LIVE_GROQ_EVAL=0
+          -e LANGSMITH_TRACING=false -e LANGCHAIN_TRACING_V2=false
+          api uv run --no-sync python -m music_store_agent.evaluation.runner
+
+      - name: Verify API health, readiness and Streamlit health
+        run: |
+          docker compose exec -T api uv run --no-sync python - <<'PY'
+          """Verify internal service endpoints without constructing a live model."""
+          import json
+          import urllib.request
+
+          checks = (
+              ("http://api:8000/health", {"status": "ok"}),
+              ("http://api:8000/ready", {"status": "ready"}),
+              ("http://web:8501/_stcore/health", "ok"),
+          )
+          for endpoint, expected in checks:
+              with urllib.request.urlopen(endpoint, timeout=5) as response:
+                  assert response.status == 200
+                  body = response.read().decode().strip()
+                  actual = json.loads(body) if isinstance(expected, dict) else body
+                  assert actual == expected, "Unexpected health response."
+                  print(f"{endpoint}: HTTP {response.status}")
+          PY
+
+      - name: Show service status on failure
+        if: failure()
+        run: docker compose ps --all
+
+      - name: Clean up CI resources
+        if: always()
+        run: docker compose down --volumes --remove-orphans --timeout 10
