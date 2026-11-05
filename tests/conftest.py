@@ -20,6 +20,7 @@ def sample_test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Scoped defaults; challenge tests select their mode explicitly.
     """
     monkeypatch.setenv("AI_DATASET_MODE", "sample")
+    monkeypatch.setenv("AI_ADMISSION_ENABLED", "false")
     monkeypatch.setenv("AI_DEMO_SCHEMA", "")
     monkeypatch.setenv("AI_STATE_SCHEMA", "")
 

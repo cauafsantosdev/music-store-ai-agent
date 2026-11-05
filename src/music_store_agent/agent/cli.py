@@ -59,7 +59,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             with ConversationStore(
                 settings.ai_state_schema, dataset_mode=settings.ai_dataset_mode
             ) as store:
-                store.initialize()
+                store.initialize(admission=settings.ai_admission_enabled)
             print("Memória PostgreSQL inicializada.")
             return 0
         engine = select_dataset(

@@ -13,6 +13,7 @@ from langchain_groq import ChatGroq
 from pydantic import SecretStr
 from sqlalchemy import Engine
 
+from music_store_agent.agent.admission import AdmissionController
 from music_store_agent.agent.config import AgentSettings, load_settings
 from music_store_agent.agent.demo import dataset_mode, select_dataset, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
@@ -112,6 +113,7 @@ class AppResources:
         """
         verify_demo(self.engine())
         self.store().check_ready()
+        AdmissionController(self.store(), self.settings()).check_ready()
         key = self.settings().groq_api_key
         if self._model is None and (key is None or not key.get_secret_value().strip()):
             raise AgentFailure(ErrorCode.MISSING_API_KEY)

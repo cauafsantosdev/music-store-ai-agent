@@ -20,6 +20,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from sqlalchemy import Engine
 
+from music_store_agent.agent.admission import AdmissionController
 from music_store_agent.agent.config import AgentSettings, load_settings
 from music_store_agent.agent.demo import dataset_mode, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode
@@ -97,6 +98,13 @@ def create_store_agent(
         if state_store.dataset_mode != settings.ai_dataset_mode:
             raise AgentFailure(ErrorCode.SESSION_UNVERIFIED)
         state_store.check_ready()
+    admission = AdmissionController(state_store, settings)
+    try:
+        admission.check_ready()
+    except BaseException:
+        if owns_store:
+            state_store.close()
+        raise
 
     @wrap_model_call
     def guard_model(
@@ -117,6 +125,7 @@ def create_store_agent(
         verify_demo(engine)
         if len(request.state["messages"]) > settings.ai_max_history_messages:
             raise AgentFailure(ErrorCode.EXECUTION_LIMIT)
+        admission.model_call()
         return handler(request)
 
     @wrap_tool_call
@@ -172,4 +181,11 @@ def create_store_agent(
             ],
         )
 
-    return StoreAgent(engine, build_graph, settings, state_store, owns_store=owns_store)
+    return StoreAgent(
+        engine,
+        build_graph,
+        settings,
+        state_store,
+        owns_store=owns_store,
+        admission=admission,
+    )

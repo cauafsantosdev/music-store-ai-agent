@@ -5,6 +5,7 @@
 .env
 .env.*
 !.env.example
+!.env.prod.example
 .venv
 venv
 **/__pycache__
@@ -33,3 +34,4 @@ challenge_materials
 challenge-materials
 attachments
 .streamlit/secrets.toml
+release-artifacts

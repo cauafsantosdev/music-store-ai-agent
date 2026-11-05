@@ -222,6 +222,7 @@ __marimo__/
 # Local configuration, credentials, and database artifacts
 .env.*
 !.env.example
+!.env.prod.example
 .aws/
 .codex/
 .agents/
@@ -245,3 +246,6 @@ challenge_materials/
 challenge-materials/
 attachments/
 *.zip
+
+# Generated submission PDFs, page renders and temporary conversion output.
+/release-artifacts/

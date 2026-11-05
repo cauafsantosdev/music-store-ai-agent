@@ -18,6 +18,7 @@ from pydantic import BaseModel, SecretStr
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from music_store_agent.agent.admission import AdmissionController
 from music_store_agent.agent.config import AgentSettings
 from music_store_agent.agent.demo import dataset_mode, verified_snapshot, verify_demo
 from music_store_agent.agent.errors import AgentFailure, ErrorCode, provider_failure
@@ -173,6 +174,7 @@ class StoreAgent:
         store: ConversationStore,
         *,
         owns_store: bool = False,
+        admission: AdmissionController | None = None,
     ) -> None:
         """Retain explicit dependencies without loading conversation history.
 
@@ -182,10 +184,12 @@ class StoreAgent:
             settings: Bounded runtime configuration.
             store: Initialized state store in a separate schema.
             owns_store: Whether close() must release the store.
+            admission: Explicit persistent inference admission controller.
         """
         self._engine, self._build_graph = engine, build_graph
         self._settings, self._store = settings, store
         self._owns_store, self._closed = owns_store, False
+        self._admission = admission or AdmissionController(store, settings)
 
     def __enter__(self) -> "StoreAgent":
         """Return the explicitly managed service.
@@ -277,8 +281,9 @@ class StoreAgent:
         """Atomically commit a complete turn under a cross-process row lock.
 
         The saver shares the outer transaction connection. Intermediate checkpoints,
-        pending writes and counters roll back on failure or process death. Recovery
-        starts from the last completed turn rather than replaying incomplete tools.
+        pending writes roll back on failure or process death. Admission accounting
+        commits separately and remains charged. Recovery starts from the last
+        completed turn rather than replaying incomplete tools.
 
         Args:
             conversation_id: Target UUID.
@@ -292,9 +297,12 @@ class StoreAgent:
         try:
             self._ensure_open()
             self.validate_message(message)
-            with self._store.authorized(
-                conversation_id, _token_value(access_token)
-            ) as connection:
+            with (
+                self._store.authorized(
+                    conversation_id, _token_value(access_token)
+                ) as connection,
+                self._admission.turn(conversation_id),
+            ):
                 verify_demo(self._engine)
                 saver = self._store.saver(connection)
                 previous = _messages(saver, conversation_id)

@@ -31,6 +31,10 @@ class AgentSettings(BaseSettings):
     ai_max_output_tokens: int = Field(default=2048, ge=256, le=4096)
     ai_provider_timeout_seconds: float = Field(default=30, ge=5, le=60)
     ai_max_history_messages: int = Field(default=60, ge=8, le=100)
+    ai_admission_enabled: bool = False
+    ai_session_request_limit: int = Field(default=20, ge=1, le=100)
+    ai_daily_model_call_limit: int = Field(default=100, ge=1, le=1000)
+    ai_max_concurrent_turns: int = Field(default=1, ge=1, le=4)
 
     @model_validator(mode="before")
     @classmethod

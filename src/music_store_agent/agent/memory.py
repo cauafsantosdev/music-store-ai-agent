@@ -122,11 +122,14 @@ class ConversationStore:
             ),
         )
 
-    def initialize(self) -> None:
+    def initialize(self, *, admission: bool = False) -> None:
         """Create metadata and checkpoint tables explicitly and idempotently.
 
         setup() can create concurrent indexes and therefore runs in autocommit,
         under a schema-specific session advisory lock rather than a transaction.
+
+        Args:
+            admission: Also initialize persistent inference counters explicitly.
 
         Raises:
             AgentFailure: If initialization fails.
@@ -152,6 +155,12 @@ class ConversationStore:
                         "updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
                     )
                     self.saver(connection).setup()
+                    if admission:
+                        from music_store_agent.agent.admission import (
+                            initialize_admission,
+                        )
+
+                        initialize_admission(connection)
                 finally:
                     connection.execute(
                         "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",

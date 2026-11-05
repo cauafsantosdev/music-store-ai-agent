@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="715" viewBox="0 0 1060 715" role="img" aria-labelledby="title description">
+  <title id="title">Music Store AI Agent architecture</title>
+  <desc id="description">In production, a browser reaches shared Caddy over HTTPS. Caddy routes the interface and WebSocket to Streamlit, and only browser-session POST requests to FastAPI. Streamlit uses the private API. LangChain and LangGraph call bounded business tools over PostgreSQL and remote GroqCloud inference. PostgreSQL separates operational data, policy full-text retrieval and native conversation checkpoints.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#8ea6be"/></marker>
+    <style>
+      text{font-family:Arial,Helvetica,sans-serif;fill:#edf3fa}
+      .box{fill:#182b3d;stroke:#4d718f;stroke-width:1.6}
+      .title{font-size:22px;font-weight:700}
+      .body{font-size:18px;fill:#c9d7e4}
+      .small{font-size:16px;fill:#b7c9d9}
+      .line{fill:none;stroke:#8ea6be;stroke-width:2;marker-end:url(#arrow)}
+      .muted{fill:#102131;stroke:#37536c;stroke-width:1.2}
+    </style>
+  </defs>
+  <rect width="1060" height="715" rx="14" fill="#0c1722"/>
+  <text x="35" y="38" class="title">Music Store AI Agent</text>
+  <text x="1025" y="38" text-anchor="end" class="small">Remote inference · persistent PostgreSQL state</text>
+  <rect x="35" y="75" width="220" height="100" rx="10" class="box"/>
+  <text x="145" y="113" text-anchor="middle" class="title">Browser</text>
+  <text x="145" y="142" text-anchor="middle" class="body">Portuguese chat</text>
+  <rect x="350" y="75" width="300" height="100" rx="10" class="box"/>
+  <text x="500" y="113" text-anchor="middle" class="title">Caddy · production</text>
+  <text x="500" y="142" text-anchor="middle" class="body">Shared HTTPS reverse proxy</text>
+  <rect x="755" y="75" width="270" height="100" rx="10" class="box"/>
+  <text x="890" y="113" text-anchor="middle" class="title">Streamlit</text>
+  <text x="890" y="142" text-anchor="middle" class="body">UI + server-side recovery</text>
+  <path d="M255 123H350" class="line"/>
+  <text x="302" y="108" text-anchor="middle" class="small">HTTPS</text>
+  <path d="M650 123H755" class="line"/>
+  <text x="703" y="97" text-anchor="middle" class="small">HTTP / WS</text>
+  <rect x="755" y="275" width="270" height="105" rx="10" class="box"/>
+  <text x="890" y="313" text-anchor="middle" class="title">FastAPI</text>
+  <text x="890" y="343" text-anchor="middle" class="body">Private conversation API</text>
+  <path d="M890 175V275" class="line"/>
+  <text x="905" y="242" class="small">Internal HTTP</text>
+  <path d="M500 175V205H820V275" class="line" stroke-dasharray="6 5"/>
+  <rect x="508" y="184" width="294" height="29" rx="5" fill="#0c1722"/>
+  <text x="655" y="204" text-anchor="middle" class="small">/browser-session/* POST + cookie</text>
+  <rect x="350" y="275" width="300" height="105" rx="10" class="box"/>
+  <text x="500" y="309" text-anchor="middle" class="title">LangChain / LangGraph</text>
+  <text x="500" y="338" text-anchor="middle" class="body">Bounded model / tool loop</text>
+  <text x="500" y="362" text-anchor="middle" class="small">Six deterministic business tools</text>
+  <path d="M755 327H650" class="line"/>
+  <rect x="35" y="275" width="220" height="105" rx="10" fill="#18323b" stroke="#5c9da0" stroke-width="1.6"/>
+  <text x="145" y="311" text-anchor="middle" class="title">GroqCloud</text>
+  <text x="145" y="340" text-anchor="middle" class="body">openai/gpt-oss-120b</text>
+  <text x="145" y="364" text-anchor="middle" class="small">External inference API</text>
+  <path d="M350 327H255" class="line"/>
+  <text x="302" y="310" text-anchor="middle" class="small">HTTPS</text>
+  <path d="M500 380V455" class="line"/>
+  <text x="520" y="425" class="small">Verified SQL + native saver transactions</text>
+  <rect x="35" y="455" width="990" height="195" rx="12" class="box"/>
+  <text x="60" y="489" class="title">PostgreSQL 17 · dedicated application database</text>
+  <rect x="60" y="510" width="280" height="115" rx="8" class="muted"/>
+  <text x="200" y="542" text-anchor="middle" class="title">Operational data</text>
+  <text x="200" y="571" text-anchor="middle" class="body">Catalog · prices · orders</text>
+  <text x="200" y="599" text-anchor="middle" class="small">Sample / challenge schemas</text>
+  <rect x="365" y="510" width="290" height="115" rx="8" class="muted"/>
+  <text x="510" y="542" text-anchor="middle" class="title">Policy retrieval</text>
+  <text x="510" y="571" text-anchor="middle" class="body">Original PDF sections + pages</text>
+  <text x="510" y="599" text-anchor="middle" class="small">Portuguese FTS · no embeddings</text>
+  <rect x="680" y="510" width="320" height="115" rx="8" class="muted"/>
+  <text x="840" y="542" text-anchor="middle" class="title">Conversation state</text>
+  <text x="840" y="571" text-anchor="middle" class="body">Capabilities · PostgresSaver</text>
+  <text x="840" y="599" text-anchor="middle" class="small">Separate checkpoint schemas</text>
+  <text x="35" y="685" class="small">Production: only Caddy publishes HTTP(S). Development: localhost ports replace Caddy.</text>
+</svg>

@@ -1,0 +1,188 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to the VPS after publishing verified images
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: music-store-agent-release
+  cancel-in-progress: false
+
+jobs:
+  verify-ci:
+    name: Require trusted main commit and successful offline CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Verify release source and exact-commit CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test "$GITHUB_REPOSITORY" = cauafsantosdev/music-store-ai-agent
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          successful_runs="$(gh api \
+            "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))] | length')"
+          test "$successful_runs" -gt 0
+
+  publish:
+    name: Publish immutable API and web images
+    needs: verify-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish exact-commit images
+        run: |
+          for service in api web; do
+            image="ghcr.io/cauafsantosdev/music-store-ai-agent-$service:$GITHUB_SHA"
+            if docker manifest inspect "$image" >/dev/null 2>manifest-error; then
+              docker pull "$image"
+              revision="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+              source="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')"
+              test "$revision" = "$GITHUB_SHA"
+              test "$source" = "https://github.com/$GITHUB_REPOSITORY"
+              echo "Existing verified SHA image reused without replacing its tag."
+              continue
+            fi
+            if ! grep -Eqi 'manifest unknown|no such manifest|manifest_unknown' manifest-error; then
+              echo "error: registry tag availability could not be verified" >&2
+              exit 1
+            fi
+            docker build --file docker/production.Dockerfile --target "$service" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --tag "$image" .
+            docker push "$image"
+          done
+
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io
+
+  deploy:
+    name: Deploy application to VPS
+    if: ${{ inputs.deploy }}
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact release configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Configure strict deployment SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+        run: |
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          umask 077
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/music_store_deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/music_store_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Upload Compose and deploy exact published SHA
+        env:
+          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          SSH_USER: ${{ secrets.PROD_SSH_USER }}
+        run: |
+          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$SSH_PORT" =~ ^[0-9]+$ ]]
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          remote="$SSH_USER@$SSH_HOST"
+          options=(
+            -i "$HOME/.ssh/music_store_deploy"
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/known_hosts"
+            -o IdentitiesOnly=yes
+            -o BatchMode=yes
+            -o ConnectTimeout=10
+          )
+          # One-time operator setup must already have created this directory,
+          # its private .env.prod, shared database and original source mount.
+          ssh "${options[@]}" -p "$SSH_PORT" "$remote" \
+            'test -d /opt/apps/music-store-ai-agent && test -s /opt/apps/music-store-ai-agent/.env.prod'
+          scp "${options[@]}" -P "$SSH_PORT" compose.prod.yaml \
+            "$remote:/opt/apps/music-store-ai-agent/compose.prod.yaml"
+          ssh "${options[@]}" -p "$SSH_PORT" "$remote" \
+            "bash -s -- '$GITHUB_SHA'" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          cd /opt/apps/music-store-ai-agent
+          test -s .env.prod
+          docker network inspect vps-edge >/dev/null
+          docker network inspect vps-data >/dev/null
+          umask 077
+          printf 'IMAGE_TAG=%s\n' "$sha" > .release.env.next
+          started=0
+          cleanup() {
+            status=$?
+            rm -f .release.env.next
+            if [[ "$status" -ne 0 && "$started" -eq 1 && -s .release.env ]]; then
+              echo 'Release failed; attempting previous-image rollback.' >&2
+              docker compose --env-file .env.prod --env-file .release.env \
+                -f compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 120 || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          dc() {
+            docker compose --env-file .env.prod --env-file .release.env.next \
+              -f compose.prod.yaml "$@"
+          }
+          dc config --quiet
+          dc pull
+          dc run --rm --no-deps api python -m music_store_agent.agent.cli --init-demo
+          dc run --rm --no-deps api python -m music_store_agent.agent.cli --init-state
+          started=1
+          dc up -d --remove-orphans --wait --wait-timeout 120
+          mv -f .release.env.next .release.env
+          trap - EXIT
+          docker compose --env-file .env.prod --env-file .release.env \
+            -f compose.prod.yaml ps
+          REMOTE
+
+      - name: Verify public HTTPS Streamlit health
+        run: |
+          curl --fail --show-error --silent --retry 12 --retry-delay 5 \
+            --retry-connrefused --max-time 10 \
+            https://emporio-da-musica.cauafsantos.dev/_stcore/health
+
+      - name: Remove deployment credentials
+        if: always()
+        run: rm -f "$HOME/.ssh/music_store_deploy"

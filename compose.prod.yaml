@@ -1,0 +1,117 @@
+# Standalone application deployment; shared infrastructure is owned by vps-infra.
+name: music-store-agent-production
+
+x-runtime: &runtime
+  restart: unless-stopped
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 128
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+
+x-browser: &browser
+  BROWSER_SESSION_KEY: ${BROWSER_SESSION_KEY:?Set a stable production Fernet key}
+  BROWSER_APP_ORIGIN: https://${APP_DOMAIN:?Set the verified public hostname}
+  BROWSER_SESSION_API_ORIGIN: https://${APP_DOMAIN:?Set the verified public hostname}
+  BROWSER_SESSION_ALLOW_HTTP_LOCALHOST: "false"
+  LANGSMITH_TRACING: "false"
+  LANGCHAIN_TRACING_V2: "false"
+
+services:
+  api:
+    <<: *runtime
+    image: ghcr.io/cauafsantosdev/music-store-ai-agent-api:${IMAGE_TAG:?Set a full release commit SHA}
+    cpus: "1.00"
+    mem_limit: 768m
+    stop_grace_period: 3m
+    environment:
+      <<: *browser
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PGDATABASE:-music_store_agent}
+      PGUSER: ${PGUSER:-music_store_agent}
+      PGPASSWORD: ${PGPASSWORD:?Set the dedicated database role password}
+      GROQ_API_KEY: ${GROQ_API_KEY:?Set the authorized free-plan Groq key}
+      AI_MODEL: openai/gpt-oss-120b
+      AI_DATASET_MODE: challenge
+      AI_DEMO_SCHEMA: agent_demo_challenge
+      AI_STATE_SCHEMA: agent_state_challenge
+      AI_CHALLENGE_DIRECTORY: /run/music-store/challenge
+      AI_MAX_MODEL_CALLS: "4"
+      AI_MAX_TOOL_CALLS: "6"
+      AI_RECURSION_LIMIT: "24"
+      AI_MAX_OUTPUT_TOKENS: "2048"
+      AI_PROVIDER_TIMEOUT_SECONDS: "30"
+      AI_MAX_HISTORY_MESSAGES: "60"
+      # Public inference must never silently lose its persistent admission guard.
+      AI_ADMISSION_ENABLED: "true"
+      AI_SESSION_REQUEST_LIMIT: ${AI_SESSION_REQUEST_LIMIT:-20}
+      AI_DAILY_MODEL_CALL_LIMIT: ${AI_DAILY_MODEL_CALL_LIMIT:-100}
+      AI_MAX_CONCURRENT_TURNS: ${AI_MAX_CONCURRENT_TURNS:-1}
+    volumes:
+      - type: bind
+        source: ${CHALLENGE_SOURCE_DIRECTORY:?Set an absolute private source directory}
+        target: /run/music-store/challenge
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      edge:
+        aliases:
+          - music-store-agent-api
+      data:
+      app:
+        aliases:
+          - music-store-agent-api-internal
+
+  web:
+    <<: *runtime
+    image: ghcr.io/cauafsantosdev/music-store-ai-agent-web:${IMAGE_TAG:?Set a full release commit SHA}
+    cpus: "0.50"
+    mem_limit: 512m
+    stop_grace_period: 30s
+    environment:
+      <<: *browser
+      AI_DATASET_MODE: challenge
+      BACKEND_URL: http://music-store-agent-api-internal:8000
+      BACKEND_TIMEOUT_SECONDS: "5"
+      BACKEND_READ_TIMEOUT_SECONDS: "180"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      edge:
+        aliases:
+          - music-store-agent-web
+      app:
+
+networks:
+  edge:
+    external: true
+    name: vps-edge
+  data:
+    external: true
+    name: vps-data
+  app:
+    internal: true
